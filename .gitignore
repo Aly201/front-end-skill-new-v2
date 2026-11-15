@@ -1,0 +1,5 @@
+node_modules/
+cook/
+cook-archive/
+.DS_Store
+*.log

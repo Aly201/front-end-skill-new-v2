@@ -1,0 +1,35 @@
+name: Skill check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Syntax check scripts
+        run: for f in skills/frontend-cook/scripts/*.mjs; do node --check "$f"; done
+
+      - name: Run tests
+        run: node --test tests/*.test.mjs
+
+      - name: No em dashes in the skill's own text
+        run: "! grep -rn --include='*.md' '—' skills/ README.md"

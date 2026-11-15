@@ -1,0 +1,17 @@
+{
+  "judge": "A",
+  "fresh": true,
+  "model": "[model name]",
+  "session": "subagent",
+  "different_model": false,
+  "scores": { "layout": 8.6, "typography": 8.1, "color": 9.0, "components": 8.4, "imagery": 7.8, "responsive": 8.2, "motion": 8.0 },
+  "overall": 8.4,
+  "similarity": 81,
+  "gaps": [
+    { "where": "S1 hero, mobile", "what": "photo drops below the button, first screen is text only", "fix": "crop the photo to 4:5 and place it above the headline at 100vw" },
+    { "where": "S3 features, desktop", "what": "three identical icon cards", "fix": "one large product image left, three short claims right, as in R02" },
+    { "where": "S5 footer", "what": "13px grey links at 3.1:1 contrast", "fix": "15px, #3a4440 on the paper color" }
+  ],
+  "slop_seen": ["three identical icon cards"],
+  "would_ship": false
+}
