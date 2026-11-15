@@ -24,8 +24,10 @@
 //
 // Steps: 0 setup, 1 references, 2 mockup, 3 bar, 4 time, 5 bans, 6a static build,
 //        6b motion, 7 feedback, 8 separate judge.
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
-import { join, resolve, extname } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { join, resolve, extname, basename, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
 import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, MOTION_CODE, FRONTEND_EXT, readLedger, activeHours, userSaid } from './_common.mjs';
 
 export const STEPS = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
@@ -95,10 +97,31 @@ function stillsFor(kind) {
   return r ? S('stills', r) : null;
 }
 
+// The build URL the audit must have run on: http(s)/file URLs as given, a folder means its index.html.
+function buildUrl(g) {
+  const u = g.build?.url;
+  if (!u) return null;
+  if (/^(https?|file):/i.test(u)) return u;
+  let p = resolve(root, u);
+  try { if (statSync(p).isDirectory()) p = join(p, 'index.html'); } catch { /* missing: compared as the file path */ }
+  return pathToFileURL(p).href;
+}
+// A file with bytes in it, or a folder with something in it.
+function nonEmpty(p) {
+  try { const s = statSync(p); return s.isDirectory() ? readdirSync(p).length > 0 : s.size > 0; } catch { return false; }
+}
+// A side-by-side must be at least as new as the newest source file it compares.
+function compareCheck(dir, newest, okMsg, missingMsg) {
+  const cmp = (() => { try { return readdirSync(dir).filter((f) => /\.(jpe?g|png)$/i.test(f)).map((f) => join(dir, f)); } catch { return []; } })();
+  if (!cmp.length) return [false, missingMsg];
+  if (newestMtime(cmp) < newest) return [false, 'side-by-side is older than the latest source change: rebuild it from the new stills'];
+  return [true, okMsg];
+}
+
 function refIds() {
   const ids = new Map();
   for (const f of images(S('refs'))) {
-    const m = /^(R\d{2,})(?:[-_][\w-]+)?\.\w+$/i.exec(f.split('/').pop());
+    const m = /^(R\d{2,})(?:[-_][\w-]+)?\.\w+$/i.exec(basename(f));
     if (m) { const id = m[1].toUpperCase(); if (!ids.has(id)) ids.set(id, []); ids.get(id).push(f); }
   }
   return ids;
@@ -115,16 +138,24 @@ const C = {
     const failed = Object.entries(p.checks || {}).filter(([, c]) => !c.ok).map(([k]) => k);
     return [p.ok && ageDays < 7, p.ok ? (ageDays < 7 ? `preflight passed ${ageDays.toFixed(1)} days ago` : 'preflight is older than 7 days: run it again') : `preflight failed: ${failed.join(', ')}`];
   },
-  file: (p, label) => [existsSync(p), `${label} ${existsSync(p) ? 'exists' : 'missing'} (${p.replace(root + '/', '')})`],
+  file: (p, label) => [existsSync(p), `${label} ${existsSync(p) ? 'exists' : 'missing'} (${relative(root, p)})`],
   newer: (p, than, label) => {
     const a = mtime(p);
-    return [a > 0 && a >= than, a === 0 ? `${label} missing (${p.replace(root + '/', '')})` : a >= than ? `${label} is newer than the latest source change` : `${label} is OLDER than the latest source change: it does not show the current build. Redo it.`];
+    return [a > 0 && a >= than, a === 0 ? `${label} missing (${relative(root, p)})` : a >= than ? `${label} is newer than the latest source change` : `${label} is OLDER than the latest source change: it does not show the current build. Redo it.`];
   },
-  reportOk: (name, than, label) => {
+  // expect: { target } for a slop report (the folder it must have scanned), { url } for an audit (the build URL).
+  reportOk: (name, than, label, expect = {}) => {
     const r = report(name);
     const p = S('reports', name);
     if (!r) return [false, `${label} report missing (cook/reports/${name})`];
     if (mtime(p) < than) return [false, `${label} report is older than the latest source change: run it again`];
+    if (expect.target !== undefined && !(r.scanned > 0 && (r.targets || []).includes(expect.target))) {
+      const x = (r.targets || []).map((t) => relative(root, t)).join(', ') || 'nothing';
+      return [false, `${label}: the slop report scanned ${x}, not the build folder`];
+    }
+    if (expect.url !== undefined && r.url !== expect.url) {
+      return [false, `${label}: the audit ran on ${r.url || 'nothing'}, not the build (${expect.url ?? 'no build URL set'})`];
+    }
     return [r.ok === true, r.ok ? `${label}: clean (${r.warnings} warnings)` : `${label}: ${r.errors} errors. Fix them, then run it again`];
   },
   approval: (g, k) => {
@@ -193,7 +224,7 @@ function judgeChecks(g, round, stage, than) {
   const jpaths = judgeFilesIn(round).map((f) => S('judge', round, f));
   out.push([mtime(p) >= newestMtime(jpaths), mtime(p) >= newestMtime(jpaths) ? 'summary includes every judge file' : `a judge file changed after scoring: run gate.mjs score ${round}`]);
   // Every judge file must be at least as new as the build it judged.
-  const stale = jpaths.filter((f) => mtime(f) < than).map((f) => f.split('/').pop());
+  const stale = jpaths.filter((f) => mtime(f) < than).map((f) => basename(f));
   out.push([stale.length === 0, stale.length ? `${stale.join(', ')} is older than the latest source change: judge the current build in a new round` : 'every judge file is newer than the latest source change']);
   out.push([s.judges >= 2, `${s.judges} fresh judge(s) (need 2+)`]);
   const spreadMsg = s.spread_ok ? `judges agree within 1.0 (spread ${s.spread_overall})`
@@ -219,7 +250,12 @@ function startChecks(g, step) {
   const out = [];
   for (const prev of STEPS.slice(0, i)) out.push(C.stepPassed(g, prev));
   if (step !== '0') out.push(C.preflight());
-  if (step === '6b' && g.motion !== 'none') out.push([existsSync(S('MOTION.md')) || videoRefs().length > 0, 'motion references (cook/refs/V01...) or cook/MOTION.md present']);
+  if (step === '6b' && g.motion !== 'none') {
+    const motionDir = (() => { try { return readdirSync(S('refs', 'motion')).length > 0; } catch { return false; } })();
+    const why = g.motion === 'refs' ? 'set-motion --refs' : existsSync(S('MOTION.md')) ? 'cook/MOTION.md'
+      : videoRefs().length > 0 ? 'video references (cook/refs/V01...)' : motionDir ? 'cook/refs/motion' : null;
+    out.push([why !== null, why ? `motion source: ${why}` : 'say where motion comes from: gate.mjs set-motion --refs (or --none with the user\'s words)']);
+  }
   return out;
 }
 
@@ -256,7 +292,29 @@ function doneChecks(g, step) {
       out.push([hosts.size >= 3, `references come from ${hosts.size} different sites (need 3+: take from many, copy none)`]);
       if ((kinds.user || 0) < ids.size) {
         out.push([(kinds.inspo || 0) >= 1 && (kinds.awwwards || 0) >= 1, `found references: inspo ${kinds.inspo || 0}, awwwards ${kinds.awwwards || 0} (use both libraries for what the user did not supply)`]);
+        // The libraries must have been called, not just named in SOURCES.md: the guard logs MCP calls.
+        const pf = readJson(S('PREFLIGHT.json')) || {};
+        const mcpCalls = readLedger(root).map((e) => e.tool).filter((t) => typeof t === 'string' && t.startsWith('mcp__'));
+        const callsTo = (key, fallback) => {
+          const name = pf.checks?.[`mcp_${key}`]?.name;
+          return mcpCalls.filter((t) => (name ? t.startsWith(`mcp__${name}__`) : fallback.test(t))).length;
+        };
+        const nInspo = callsTo('inspo', /inspo/i), nAwwwards = callsTo('awwwards', /awwwards/i);
+        out.push([nInspo > 0 && nAwwwards > 0, nInspo > 0 && nAwwwards > 0
+          ? 'Inspo and Awwwards tool calls are logged'
+          : `no Inspo/Awwwards tool call is logged: the libraries were not used (Inspo calls logged: ${nInspo}, Awwwards calls logged: ${nAwwwards})`]);
       }
+      // Two reference files that are the same image (same size, same bytes) are one reference, not two.
+      const seen = new Map(), dupes = [];
+      for (const [id, files] of ids) {
+        for (const f of files) {
+          let key;
+          try { key = `${statSync(f).size}:${createHash('sha1').update(readFileSync(f)).digest('hex')}`; } catch { continue; }
+          if (seen.has(key) && seen.get(key) !== id) dupes.push(`${seen.get(key)} and ${id}`);
+          else seen.set(key, id);
+        }
+      }
+      out.push([dupes.length === 0, dupes.length ? `${dupes.join('; ')} are the same image: each reference must be a different capture` : 'no two references are the same image']);
       const shots = (() => { try { return readFileSync(S('SHOTS.md'), 'utf8'); } catch { return ''; } })();
       const noShot = [...ids.keys()].filter((id) => !new RegExp(`\\b${id}\\b`, 'i').test(shots));
       out.push([shots.length > 0 && noShot.length === 0, noShot.length ? `SHOTS.md does not cover: ${noShot.join(', ')}` : 'SHOTS.md covers every reference with what to take from it']);
@@ -266,14 +324,15 @@ function doneChecks(g, step) {
       const files = mockupFiles();
       const newest = newestMtime(files);
       out.push(C.file(S('mockup', 'index.html'), 'mockup'));
+      const single = walk(S('mockup'), FRONTEND_EXT);
+      out.push([single.length === 1, single.length === 1 ? 'mockup is a single file' : `the mockup must be a single file (one .html with its CSS and JS inside), found ${single.length} frontend files`]);
       const st = images(S('stills', 'mockup'));
       for (const vp of ['desktop', 'mobile']) {
-        const f = st.find((p) => p.split('/').pop().includes(vp));
+        const f = st.find((p) => basename(p).includes(vp));
         out.push(f ? C.newer(f, newest, `mockup ${vp} still`) : [false, `mockup ${vp} still missing (shoot.mjs cook/mockup --out cook/stills/mockup --name mockup)`]);
       }
-      const cmp = (() => { try { return readdirSync(S('compare', 'mockup')).filter((f) => /\.(jpe?g|png)$/i.test(f)); } catch { return []; } })();
-      out.push([cmp.length > 0, cmp.length ? 'side-by-side with the references exists' : 'no side-by-side in cook/compare/mockup (cook/scripts/side-by-side.mjs)']);
-      out.push(C.reportOk('slop-mockup.json', newest, 'slop scan of the mockup'));
+      out.push(compareCheck(S('compare', 'mockup'), newest, 'side-by-side with the references exists', 'no side-by-side in cook/compare/mockup (cook/scripts/side-by-side.mjs)'));
+      out.push(C.reportOk('slop-mockup.json', newest, 'slop scan of the mockup', { target: resolve(S('mockup')) }));
       const anim = motionCodeIn(files);
       out.push([anim.length === 0, anim.length ? `animation code in the mockup (it must be static): ${anim.join(', ')}` : 'mockup is static']);
       out.push(...judgeChecks(g, 'mockup', 'mockup', newest));
@@ -332,6 +391,7 @@ function doneChecks(g, step) {
       out.push([rows.length >= 5, `MOTION.md lists ${rows.length} effect(s) (need 5+ table rows)`]);
       const evidence = (() => { try { return readdirSync(S('refs', 'motion')); } catch { return []; } })();
       const refsDir = (() => { try { return readdirSync(S('refs')); } catch { return []; } })();
+      const srcs = srcFiles(g);
       const cited = new Set();
       let vague = 0, unsourced = [];
       for (const row of rows) {
@@ -345,13 +405,19 @@ function doneChecks(g, step) {
       out.push([vague === 0 && rows.length > 0, vague ? `${vague} effect(s) without a measured duration and easing in the "How" column (e.g. "700ms, cubic-bezier(.2,.7,.2,1), 24px up")` : 'every effect has a duration and an easing']);
       out.push([unsourced.length === 0, unsourced.length ? `effects not tied to a reference id (R01 / V01): ${[...new Set(unsourced)].join(', ')}` : 'every effect cites a reference']);
       out.push([cited.size >= 2, `effects taken from ${cited.size} reference(s) (need 2+: take from many, copy none)`]);
+      const anim = motionCodeIn(srcs);
+      out.push([anim.length > 0, anim.length ? `animation code in the build: ${anim.slice(0, 3).join(', ')}` : 'the build has no animation code yet']);
       for (const id of cited) {
-        // Evidence: the user's video (refs/V01.*), a recording, or any tool's extraction output in refs/motion/<ID>*.
-        const files = [...refsDir.filter((f) => f.toUpperCase().startsWith(id) && /\.(mp4|webm|mov|gif)$/i.test(f)), ...evidence.filter((f) => f.toUpperCase().startsWith(id))];
-        out.push([files.length > 0, files.length ? `${id}: motion evidence ${files.slice(0, 3).join(', ')}` : `${id}: no motion evidence. Save what you extracted (recording, frames, get_motion_dna / analyze_scroll_map output, any tool's notes) as cook/refs/motion/${id}-<what>.<ext>`]);
+        // Evidence, non-empty: the user's video (refs/V01.*), a recording, or any tool's extraction output in
+        // refs/motion/<ID>*. The id must be followed by a non-digit: R030 is not evidence for R03.
+        const idRe = new RegExp('^' + id + '(?!\\d)', 'i');
+        const found = [
+          ...refsDir.filter((f) => idRe.test(f) && /\.(mp4|webm|mov|gif)$/i.test(f)).map((f) => S('refs', f)),
+          ...evidence.filter((f) => idRe.test(f)).map((f) => S('refs', 'motion', f)),
+        ].filter(nonEmpty);
+        out.push([found.length > 0, found.length ? `${id}: motion evidence ${found.slice(0, 3).map((p) => basename(p)).join(', ')}` : `${id}: no motion evidence. Save what you extracted (recording, frames, get_motion_dna / analyze_scroll_map output, any tool's notes) as cook/refs/motion/${id}-<what>.<ext>`]);
       }
-      const files = srcFiles(g);
-      const newest = newestMtime(files);
+      const newest = newestMtime(srcs);
       const r = latestRound();
       if (!r) { out.push([false, 'no round yet']); break; }
       out.push(...roundEvidence(g, r, newest, true));
@@ -422,7 +488,7 @@ function motionCodeIn(files) {
     if (!FRONTEND_EXT.includes(extname(f).toLowerCase())) continue;
     const lines = readFileSync(f, 'utf8').split('\n');
     const i = lines.findIndex((l) => MOTION_CODE.test(l));
-    if (i >= 0) hits.push(`${f.replace(root + '/', '')}:${i + 1}`);
+    if (i >= 0) hits.push(`${relative(root, f)}:${i + 1}`);
   }
   return hits;
 }
@@ -431,17 +497,16 @@ function roundEvidence(g, r, newest, needVideo) {
   const out = [];
   const st = images(S('stills', r));
   for (const vp of ['desktop', 'mobile']) {
-    const f = st.filter((p) => p.split('/').pop().includes(vp)).sort((a, b) => mtime(a) - mtime(b))[0];
+    const f = st.filter((p) => basename(p).includes(vp)).sort((a, b) => mtime(a) - mtime(b))[0];
     out.push(f ? C.newer(f, newest, `${r} ${vp} stills`) : [false, `${r} ${vp} stills missing (shoot.mjs <url> --out cook/stills/${r} --name S01)`]);
   }
   if (needVideo) {
     let vids = []; try { vids = readdirSync(S('stills', r)).filter((f) => f.endsWith('-motion.webm')).map((f) => S('stills', r, f)); } catch { /* none */ }
     out.push(vids.length ? C.newer(vids[0], newest, `${r} motion recording`) : [false, `${r} motion recording missing (shoot.mjs <url> --out cook/stills/${r} --name S01 --live --video 12)`]);
   }
-  const cmp = (() => { try { return readdirSync(S('compare', r)).filter((f) => /\.(jpe?g|png)$/i.test(f)); } catch { return []; } })();
-  out.push([cmp.length > 0, cmp.length ? `${r} side-by-side exists` : `${r} side-by-side missing (cook/compare/${r}/)`]);
-  out.push(C.reportOk(`slop-${r}.json`, newest, `${r} slop scan`));
-  out.push(C.reportOk(`audit-${r}.json`, newest, `${r} audit`));
+  out.push(compareCheck(S('compare', r), newest, `${r} side-by-side exists`, `${r} side-by-side missing (cook/compare/${r}/)`));
+  out.push(C.reportOk(`slop-${r}.json`, newest, `${r} slop scan`, { target: g.build?.src ? resolve(root, g.build.src) : null }));
+  out.push(C.reportOk(`audit-${r}.json`, newest, `${r} audit`, { url: buildUrl(g) }));
   return out;
 }
 

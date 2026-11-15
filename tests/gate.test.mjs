@@ -3,13 +3,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, readFileSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { randomBytes } from 'node:crypto';
 
 const SCRIPTS = resolve(import.meta.dirname, '..', 'skills', 'frontend-cook', 'scripts');
 const GATE = join(SCRIPTS, 'gate.mjs');
-const proj = mkdtempSync(join(tmpdir(), 'fecook-'));
+const proj = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-')));
 const cook = (...p) => join(proj, 'cook', ...p);
 
 function runGate(dir, args) {
@@ -18,11 +20,13 @@ function runGate(dir, args) {
 }
 const gate = (...args) => runGate(proj, args);
 function write(path, text) { mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, text); }
-// A file with a valid PNG header of the given size (the gate reads headers only).
+// A file with a valid PNG header of the given size (the gate reads headers only). The bytes are
+// random after the header, so two files of the same size are still different images.
 function png(path, w, h) {
-  const b = Buffer.alloc(33);
+  const b = Buffer.alloc(41);
   b.writeUInt32BE(0x89504e47, 0); b.writeUInt32BE(0x0d0a1a0a, 4);
   b.writeUInt32BE(13, 8); b.write('IHDR', 12, 'ascii'); b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20);
+  randomBytes(8).copy(b, 33);
   mkdirSync(join(path, '..'), { recursive: true }); writeFileSync(path, b);
 }
 // Every HTML page the tests write sets a typeface (the slop scan flags a page with none).
@@ -44,6 +48,10 @@ function say(text, dir = proj) {
 // The build (or the mockup) was written by the builder session.
 function built(file, dir = proj) {
   logLine(dir, { at: new Date().toISOString(), session_id: 'builder', tool: 'Write', file, agent: null });
+}
+// An MCP tool call (the guard hook logs it with the MCP tool name).
+function mcpCall(dir, tool) {
+  logLine(dir, { at: new Date().toISOString(), session_id: 'builder', tool, file: null, agent: null });
 }
 const DIMS = ['layout', 'typography', 'color', 'components', 'imagery', 'responsive', 'motion'];
 function judgeDoc(name, overall, model) {
@@ -79,6 +87,18 @@ function newProject() {
   assert.equal(runGate(d, ['init', '--project', 'P']).code, 0);
   return d;
 }
+// A project with nine references (five inspo, four awwwards), SOURCES.md and SHOTS.md, step 0 done.
+function refsProject(checks = {}) {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-refs-')));
+  write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks }));
+  assert.equal(runGate(d, ['init', '--project', 'Refs']).code, 0);
+  write(join(d, 'cook', 'BRIEF.md'), "# Brief\nTarget: a landing page for a rope maker.\nUser's words: \"make it feel like a workshop\"\n");
+  const hosts = 'abcdefghi'.split('').map((c) => `${c}.com`);
+  hosts.forEach((h, i) => png(join(d, 'cook', 'refs', `R0${i + 1}.png`), 1440, 900));
+  write(join(d, 'cook', 'refs', 'SOURCES.md'), hosts.map((h, i) => `R0${i + 1} | ${i < 5 ? 'inspo' : 'awwwards'} | https://${h}/ | take: type`).join('\n'));
+  write(join(d, 'cook', 'SHOTS.md'), hosts.map((h, i) => `| S0${i + 1} | R0${i + 1} | hero | desktop | spacing | - |`).join('\n'));
+  return d;
+}
 
 test('gates refuse until proof exists, then pass in order', () => {
   write(cook('PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
@@ -95,6 +115,16 @@ test('gates refuse until proof exists, then pass in order', () => {
   write(cook('SHOTS.md'), hosts.map((h, i) => `| S0${i + 1} | R0${i + 1} | hero | desktop | spacing | - |`).join('\n'));
   png(cook('refs', 'R09.png'), 400, 300);
   assert.match(gate('verify', '1').out, /R09: 400x300/, 'thumbnail-sized reference is refused');
+  png(cook('refs', 'R09.png'), 1440, 900);
+  // Inspo and Awwwards supplied references, so their tools must have been called, not just named.
+  assert.match(gate('verify', '1').out, /libraries were not used/, 'naming the libraries in SOURCES.md is not enough');
+  mcpCall(proj, 'mcp__inspo__recommend');
+  mcpCall(proj, 'mcp__awwwards__search_sites');
+  assert.equal(gate('verify', '1').code, 0, gate('verify', '1').out);
+  // Two references that are the same image are one reference.
+  const r08 = readFileSync(cook('refs', 'R08.png'));
+  write(cook('refs', 'R09.png'), r08);
+  assert.match(gate('verify', '1').out, /R0[89] and R0[89] are the same image/);
   png(cook('refs', 'R09.png'), 1440, 900);
   assert.equal(gate('verify', '1').code, 0, gate('verify', '1').out);
 
@@ -140,7 +170,7 @@ test('gates refuse until proof exists, then pass in order', () => {
   say('em dashes are fine in the blog copy');
   assert.equal(gate('verify', '5').code, 0, gate('verify', '5').out);
 
-  // Step 6a: static build
+  // Step 6a: static build. The audit must have run on this build's URL.
   write(join(proj, 'site', 'index.html'), page('<h1>Rope for boats that get used.</h1>'));
   built('site/index.html');
   assert.equal(gate('set-build', '--src', 'site', '--url', 'site/index.html').code, 0);
@@ -148,14 +178,28 @@ test('gates refuse until proof exists, then pass in order', () => {
   png(cook('stills', 'r01', 'S01-mobile.png'), 780, 3000);
   write(cook('compare', 'r01', 'all.jpg'), 'x');
   assert.equal(slop(join(proj, 'site'), cook('reports', 'slop-r01.json')), 0);
-  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, errors: 0, warnings: 0 }));
+  const siteUrl = pathToFileURL(join(proj, 'site', 'index.html')).href;
+  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: siteUrl, errors: 0, warnings: 0 }));
   judges('r01', 8.9);
   gate('score', 'r01');
   // Animation code in the static build is refused.
   write(join(proj, 'site', 'anim.css'), 'h1 { animation: rise 1s; }');
   built('site/anim.css');
   assert.match(gate('verify', '6a').out, /animation code in the static build/);
+  // An audit of some other URL does not prove this build.
+  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: 'https://other.example/', errors: 0, warnings: 0 }));
+  assert.match(gate('verify', '6a').out, /the audit ran on https:\/\/other\.example\/, not the build/);
+  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: siteUrl, errors: 0, warnings: 0 }));
   write(join(proj, 'site', 'anim.css'), 'a { transition: color .2s; }');
+  // The side-by-side must be at least as new as the newest source: an old one is refused.
+  write(cook('compare', 'r01', 'all.jpg'), 'x');
+  const hourAgo = new Date(Date.now() - 3600000);
+  utimesSync(cook('compare', 'r01', 'all.jpg'), hourAgo, hourAgo);
+  assert.match(gate('verify', '6a').out, /side-by-side is older than the latest source change: rebuild it from the new stills/);
+  write(cook('compare', 'r01', 'all.jpg'), 'x');
+  // A slop report of some other folder does not prove this build.
+  slop(cook('mockup'), cook('reports', 'slop-r01.json'));
+  assert.match(gate('verify', '6a').out, /the slop report scanned cook\/mockup, not the build folder/);
   for (const p of ['S01-desktop.png', 'S01-mobile.png']) later(cook('stills', 'r01', p));
   slop(join(proj, 'site'), cook('reports', 'slop-r01.json')); later(cook('reports', 'slop-r01.json')); later(cook('reports', 'audit-r01.json'));
   assert.match(gate('verify', '6a').out, /overall 8\.8\/10 calibrated \(bar 9\.2/, 'below the bar is refused');
@@ -166,12 +210,13 @@ test('gates refuse until proof exists, then pass in order', () => {
   assert.equal(gate('approve', 'static', '--quote', 'static looks good, go on').code, 0);
   assert.equal(gate('verify', '6a').code, 0, gate('verify', '6a').out);
 
-  // A source change after the stills makes old proof stale. Stills, reports and judges are redone.
+  // A source change after the stills makes old proof stale. Stills, reports, the side-by-side and judges are redone.
   later(join(proj, 'site', 'index.html'));
   assert.match(gate('verify', '6a').out, /OLDER than the latest source change/);
   for (const p of [cook('stills', 'r01', 'S01-desktop.png'), cook('stills', 'r01', 'S01-mobile.png')]) later(p);
   slop(join(proj, 'site'), cook('reports', 'slop-r01.json')); later(cook('reports', 'slop-r01.json'));
   later(cook('reports', 'audit-r01.json'));
+  write(cook('compare', 'r01', 'all.jpg'), 'x'); later(cook('compare', 'r01', 'all.jpg'));
   rejudge('r01', 9.6);
   rescore('r01');
 
@@ -222,12 +267,19 @@ test('override is logged with the unmet requirements and needs the user words', 
   assert.ok(g.overrides['8'].unmet.length > 0);
 });
 
-test('motion must come from references, with saved evidence from any tool', () => {
-  const p2 = mkdtempSync(join(tmpdir(), 'fecook-m-'));
-  const g2 = (...a) => { const r = spawnSync(process.execPath, [GATE, ...a], { cwd: p2, encoding: 'utf8' }); return r.stdout + r.stderr; };
+test('motion must come from references, real animation code and real evidence from any tool', () => {
+  const p2 = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-m-')));
+  const g2 = (...a) => runGate(p2, a).out;
   const c2 = (...p) => join(p2, 'cook', ...p);
   write(c2('PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
   g2('init', '--project', 'M');
+  // The build has animation code; the motion comes from references (set-motion --refs).
+  write(join(p2, 'site', 'index.html'), page('<style>@keyframes rise{from{opacity:0}} h1{animation:rise 1s ease}</style><h1>x</h1>'));
+  assert.equal(runGate(p2, ['set-build', '--src', 'site', '--url', 'site/index.html']).code, 0);
+  assert.match(g2('check', '6b'), /say where motion comes from: gate\.mjs set-motion --refs/);
+  g2('set-motion', '--refs');
+  assert.match(g2('check', '6b'), /PASS {2}motion source: set-motion --refs/);
+
   const row = (ref, how) => `| ${ref} | 0:02 | hero lines | ${how} | reads in order | S1 |`;
   const head = '| Ref | Time | What moves | How | Why | Use in |\n|---|---|---|---|---|---|\n';
   write(c2('MOTION.md'), head + [1, 2, 3, 4, 5].map(() => row('V01', 'fades in nicely')).join('\n'));
@@ -235,14 +287,24 @@ test('motion must come from references, with saved evidence from any tool', () =
   assert.match(out, /without a measured duration and easing/);
   assert.match(out, /from 1 reference/);
   assert.match(out, /V01: no motion evidence/);
+
   write(c2('MOTION.md'), head + ['V01', 'V01', 'R03', 'R03', 'R03'].map((r) => row(r, '700ms, cubic-bezier(.2,.7,.2,1), 24px up')).join('\n'));
   write(c2('refs', 'V01.mp4'), 'x');                                // the user's own video
-  write(c2('refs', 'motion', 'R03-motion-dna.json'), '{}');         // any tool's extraction output
+  write(c2('refs', 'motion', 'R03-notes.md'), '');                  // a zero-byte note is not evidence
+  write(c2('refs', 'motion', 'R030-other.json'), '{}');             // R030 is not evidence for R03
   out = g2('verify', '6b');
   assert.match(out, /PASS {2}every effect has a duration and an easing/);
   assert.match(out, /PASS {2}V01: motion evidence V01\.mp4/);
-  assert.match(out, /PASS {2}R03: motion evidence R03-motion-dna\.json/);
+  assert.match(out, /FAIL {2}R03: no motion evidence/);
   assert.match(out, /PASS {2}effects taken from 2 reference/);
+  write(c2('refs', 'motion', 'R03-motion-dna.json'), '{}');         // any tool's extraction output
+  out = g2('verify', '6b');
+  assert.match(out, /PASS {2}R03: motion evidence R03-motion-dna\.json/);
+  assert.match(out, /PASS {2}animation code in the build/);
+
+  // A build with no animation code yet is refused for motion.
+  write(join(p2, 'site', 'index.html'), page('<h1>x</h1>'));
+  assert.match(g2('verify', '6b'), /FAIL {2}the build has no animation code yet/);
 });
 
 test('approval needs the user words typed in this project and stills to show', () => {
@@ -363,4 +425,39 @@ test('calibrate: verified words with the number, re-based on newer rounds, offse
   say('I rate it 9.5 out of 10', d);
   assert.match(runGate(d, ['calibrate', '--user', '9.5', '--round', 'r02', '--quote', 'I rate it 9.5 out of 10']).out, /re-based on r02/);
   assert.equal(offset(), 0);
+});
+
+test('the Inspo and Awwwards calls count under the server names in PREFLIGHT; the same image twice is refused', () => {
+  const d = refsProject({ mcp_inspo: { ok: true, name: 'myinspo' }, mcp_awwwards: { ok: true, name: 'myaw' } });
+  // Calls to servers with other names do not count.
+  mcpCall(d, 'mcp__inspo__recommend');
+  mcpCall(d, 'mcp__aw__search_sites');
+  assert.match(runGate(d, ['verify', '1']).out, /no Inspo\/Awwwards tool call is logged: the libraries were not used/);
+  mcpCall(d, 'mcp__myinspo__recommend');
+  mcpCall(d, 'mcp__myaw__search_sites');
+  const ok = runGate(d, ['verify', '1']);
+  assert.equal(ok.code, 0, ok.out);
+  // Two reference files with the same bytes are one reference.
+  write(join(d, 'cook', 'refs', 'R02.png'), readFileSync(join(d, 'cook', 'refs', 'R01.png')));
+  assert.match(runGate(d, ['verify', '1']).out, /R0[12] and R0[12] are the same image/);
+});
+
+test('the mobile still is matched by its file name, not by the folder the project sits in', () => {
+  // The project folder name contains "desktop": only a desktop still exists, so the mobile check must fail.
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-desktop-')));
+  write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  assert.equal(runGate(d, ['init', '--project', 'D']).code, 0);
+  write(join(d, 'cook', 'mockup', 'index.html'), page('<h1>x</h1>'));
+  png(join(d, 'cook', 'stills', 'mockup', 'mockup-desktop.png'), 1440, 2000);
+  const out = runGate(d, ['verify', '2']).out;
+  assert.match(out, /PASS {2}mockup desktop still is newer/);
+  assert.match(out, /FAIL {2}mockup mobile still missing/);
+});
+
+test('the mockup is a single file', () => {
+  const d = newProject();
+  write(join(d, 'cook', 'mockup', 'index.html'), page('<h1>x</h1>'));
+  assert.match(runGate(d, ['verify', '2']).out, /PASS {2}mockup is a single file/);
+  write(join(d, 'cook', 'mockup', 'style.css'), 'h1 { color: #111; }');
+  assert.match(runGate(d, ['verify', '2']).out, /FAIL {2}the mockup must be a single file/);
 });
