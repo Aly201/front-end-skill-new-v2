@@ -53,4 +53,4 @@ The fix is never "remove it and leave a hole". Look at what the references do in
 
 ## Switching a ban off
 
-Only the user can, only with their own words: `{ "id": "em-dash", "quote": "em dashes are part of our editorial voice" }` in `allowed`. Before adding it, say once what the ban protects against (`pushback.md`). The scanner rejects entries without a real quote.
+Only the user can, only with their own words: `{ "id": "em-dash", "quote": "em dashes are part of our editorial voice" }` in `allowed`. The quote must appear in a message the user typed in this project; the scanner checks it against the guard log (`cook/.ledger.jsonl`) and rejects entries without one. Before adding it, say once what the ban protects against (`pushback.md`).

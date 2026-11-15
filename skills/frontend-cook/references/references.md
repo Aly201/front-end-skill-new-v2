@@ -29,7 +29,7 @@ Short prompt, strong references. One good screenshot tells the model the type, s
    - Its index is a local cache that fills over time; if search is thin, use `get_collections` or `new_winners`, and lean on Inspo.
 4. **The open web**, only if the three above leave a gap. Mark it `web` in SOURCES.md.
 
-Use both MCPs for whatever the user did not supply. The gate checks it.
+Use both MCPs for whatever the user did not supply. The gate checks the ledger for real Inspo and Awwwards tool calls, so a source word typed into SOURCES.md does not count. Each reference must be a different image: the gate rejects duplicates.
 
 ## Capture them the same way the build will be captured
 

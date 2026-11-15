@@ -4,8 +4,10 @@ The builder never scores its own work. Judges are fresh: no history, no code, no
 
 ## How to run them
 
-- **Subagents (default):** start each one with the Agent tool as a new agent (not a fork: a fork inherits your context). Give it only the prompt below and the image paths. Use at least 2 per round, 3+ for step 8. Where the harness lets you pick the model, put at least one judge on a different model from yours.
-- **Separate session (required for step 8):** the user opens a new Claude Code session in the project and runs `/frontend-cook-judge <round>`. That judge has never seen the conversation. The gate does not trust the file's own `"session"` field: it checks the guard log (`cook/.ledger.jsonl`) for a judge file written by a session that never edited the build or the mockup.
+- **Subagents (default):** start each one with the Agent tool as a new agent (not a fork: a fork inherits your context). Give it only the prompt below and the image paths. Use at least 2 per round (3 recommended for step 8). Where the harness lets you pick the model, put at least one judge on a different model from yours.
+- **Separate session (required for step 8):** the user opens a new Claude Code session in the project and runs `/frontend-cook-judge <round>`. That judge has never seen the conversation. The gate does not trust the file's own `"session"` field: it checks the guard log (`cook/.ledger.jsonl`) for a judge file written by a session that never edited the build or the mockup. That judge must meet the bar on its own; the other judges do not carry it.
+- **Judge files are written once.** The guard refuses a second write to a judge file. To change a score, add a judge or start a new round.
+- **Judge the current build.** A judge file older than the latest source change does not count. Judge the new build in a new round.
 - **No second session:** the run cannot pass step 8. Say so; do not self-score.
 
 ## What a judge gets
@@ -49,6 +51,6 @@ Set `"different_model": true` in a judge's file when it ran on a different model
 ## After the judges
 
 1. `gate.mjs score <round>`. It rejects files that are not fresh, have scores outside 0-10, or name fewer than 3 gaps.
-2. Spread above 1.0 with only 2 judges → add a third and score again.
+2. Agreement: with 2 judges, their overall scores must be within 1.0. With 3 or more, the lowest must be within 1.0 of the median. If not, fix what the low judge named, or add a judge in a new round.
 3. The weakest dimension and the top gaps become the next round's focus.
 4. Never edit a judge's file. Never re-run a judge until you like the number. Fix the work instead.

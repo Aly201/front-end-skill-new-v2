@@ -36,5 +36,6 @@ Source code, `cook/BRIEF.md`, `cook/ROUNDS.md`, `cook/SECTIONS.md`, `cook/MOTION
 ## Never
 
 - Raise a score because the work "clearly took effort" or the user seems to like it.
+- Run any frontend-cook script and do not write any file except your judge file.
 - Edit any file other than your own judge file.
 - Fix the design yourself. You judge; the builder fixes.

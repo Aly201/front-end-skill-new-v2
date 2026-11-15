@@ -121,8 +121,8 @@ function walkForSkill(dir, name, depth) {
 // Load Playwright from wherever it is installed: the project, the global npm root,
 // or a preinstalled tools folder. Returns the module or null.
 export function loadPlaywright(cwd = process.cwd()) {
-  const roots = [cwd, process.env.PLAYWRIGHT_ROOT, '/opt/node-tools'];
-  const g = spawnSync('npm', ['root', '-g'], { encoding: 'utf8' });
+  const roots = [cwd, process.env.PLAYWRIGHT_ROOT, '/opt/node-tools', join(homedir(), '.frontend-cook')];
+  const g = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', shell: process.platform === 'win32' });
   if (g.status === 0) roots.push(dirname(g.stdout.trim()));
   for (const r of roots.filter(Boolean)) {
     try { return createRequire(join(r, 'noop.js'))('playwright'); } catch { /* next */ }
@@ -134,7 +134,9 @@ export function loadPlaywright(cwd = process.cwd()) {
 export async function launchBrowser(pw) {
   const paths = [undefined, process.env.CHROME_PATH, '/opt/pw-browsers/chromium',
     '/usr/bin/chromium', '/usr/bin/chromium-browser', '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'];
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'];
   const errors = [];
   for (const executablePath of paths) {
     if (executablePath !== undefined && (!executablePath || !existsSync(executablePath))) continue;
@@ -162,7 +164,8 @@ export function isMain(metaUrl) {
 
 // Animation code. Banned in the mockup and the static build (step 6a), allowed from step 6b.
 // Hover and focus transitions are allowed in static: they are states, not animation.
-export const MOTION_CODE = /@keyframes|\banimation(?:-name)?\s*:|\bgsap\b|framer-motion|['"]motion\/react['"]|\bfrom\s+['"]motion['"]|\banimate-(?!none\b)[a-z]|\blenis\b|ScrollTrigger|useSpring|\.animate\(\s*[\[{]|\bview-timeline|\bscroll-timeline|animation-timeline/;
+// The last alternative catches transitions of 500ms or longer (hover and focus transitions are shorter).
+export const MOTION_CODE = /@keyframes|\banimation(?:-name)?\s*:|\bgsap\b|framer-motion|['"]motion\/react['"]|\bfrom\s+['"]motion['"]|\banimate-(?!none\b)[a-z]|\blenis\b|ScrollTrigger|useSpring|\.animate\(\s*[\[{]|\bview-timeline|\bscroll-timeline|animation-timeline|IntersectionObserver|requestAnimationFrame|data-aos|<marquee|\banime(?:js)?\b|react-spring|locomotive-scroll|tailwindcss-animate|\bwhileInView\b|\bwhileHover\b|<motion\.|\btransition(?:-duration)?\s*:[^;}]*?(?:\s|:|,)(?:[5-9]\d\dms|[1-9]\d{3,}ms|0?\.[5-9]\d*s|[1-9][\d.]*s)\b/;
 export const FRONTEND_EXT = ['.html', '.htm', '.css', '.scss', '.sass', '.less', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.mdx'];
 
 // The activity ledger the guard hook writes: one JSON object per line.
@@ -171,6 +174,15 @@ export function readLedger(root) {
     return readFileSync(join(root, STATE_DIR, '.ledger.jsonl'), 'utf8').split('\n').filter(Boolean)
       .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   } catch { return []; }
+}
+
+// True when the user typed the quote in this project. Quotes, case, and extra spaces are ignored.
+// Only UserPrompt lines count: the guard hook logs the user's prompts there.
+const normWords = (s) => String(s).toLowerCase().replace(/[“”"'‘’`]/g, '').replace(/\s+/g, ' ').trim();
+export function userSaid(root, quote) {
+  const q = normWords(quote);
+  if (!q) return false;
+  return readLedger(root).some((e) => e.tool === 'UserPrompt' && normWords(e.prompt || '').includes(q));
 }
 
 // Hours of real activity: gaps between tool calls of up to `gapMin` minutes count, longer gaps

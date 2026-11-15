@@ -35,7 +35,8 @@ const MCPS = {
 };
 
 function run(cmd, argv, timeout = 180000) {
-  const r = spawnSync(cmd, argv, { encoding: 'utf8', timeout, cwd });
+  // On Windows, npx/npm/claude are .cmd shims and need a shell to run.
+  const r = spawnSync(cmd, argv, { encoding: 'utf8', timeout, cwd, shell: process.platform === 'win32' });
   return { ok: r.status === 0, out: `${r.stdout || ''}${r.stderr || ''}`.trim(), missing: r.error?.code === 'ENOENT' };
 }
 
@@ -48,7 +49,8 @@ function configuredMcps() {
     const j = JSON.parse(readFileSync(claudeJson, 'utf8'));
     for (const [n, c] of Object.entries(j.mcpServers || {})) add(n, c, '~/.claude.json (user)');
     for (const [p, proj] of Object.entries(j.projects || {})) {
-      if (cwd === p || cwd.startsWith(p + '/')) {
+      const norm = (s) => s.replace(/\\/g, '/');
+      if (norm(cwd) === norm(p) || norm(cwd).startsWith(norm(p) + '/')) {
         for (const [n, c] of Object.entries(proj.mcpServers || {})) add(n, c, '~/.claude.json (local)');
       }
     }
@@ -129,6 +131,7 @@ for (const key of Object.keys(MCPS)) {
   }
   C[`mcp_${key}`] = {
     ok: Boolean(hit),
+    name: hit?.name,
     detail: hit ? `${key} MCP configured as "${hit.name}" in ${hit.where}` : `${key} MCP not configured (${MCPS[key].why}). Run: claude ${MCPS[key].claudeAdd.join(' ')}`,
   };
 }
@@ -139,21 +142,29 @@ const GUARD = join(dirname(fileURLToPath(import.meta.url)), 'guard.mjs');
 const guardCmd = `node "${GUARD}"`;
 const settingsPath = join(cwd, '.claude', 'settings.json');
 function hookState() {
-  const j = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
+  let j = {};
+  try {
+    j = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
+  } catch {
+    return { j, invalid: true, ok: false };
+  }
   const has = (ev) => (j.hooks?.[ev] || []).some((m) => (m.hooks || []).some((h) => h.command === guardCmd));
   const pre = (j.hooks?.PreToolUse || []).find((m) => (m.hooks || []).some((h) => h.command === guardCmd));
-  const matcherOk = Boolean(pre && ['Write', 'Edit', 'MultiEdit', 'Bash'].every((t) => new RegExp(`(^|\\|)${t}(\\||$)`).test(pre.matcher || '')));
-  return { j, ok: has('PreToolUse') && has('UserPromptSubmit') && matcherOk && existsSync(GUARD) };
+  const matcherOk = Boolean(pre && ['Write', 'Edit', 'MultiEdit', 'Bash'].every((t) => new RegExp(`(^|\\|)${t}(\\||$)`).test(pre.matcher || '')) && /mcp__/.test(pre.matcher));
+  return { j, invalid: false, ok: has('PreToolUse') && has('UserPromptSubmit') && matcherOk && existsSync(GUARD) };
 }
 let hs = hookState();
-if (!hs.ok && INSTALL) {
+if (hs.invalid && INSTALL) {
+  result.installed.push({ what: 'guard hook', ok: false, command: `not changed: ${settingsPath} is not valid JSON` });
+}
+if (!hs.ok && !hs.invalid && INSTALL) {
   const j = hs.j;
   j.hooks = j.hooks || {};
   // Drop stale frontend-cook entries (e.g. from an old install path), then add ours.
   for (const ev of ['PreToolUse', 'UserPromptSubmit']) {
     j.hooks[ev] = (j.hooks[ev] || []).map((m) => ({ ...m, hooks: (m.hooks || []).filter((h) => !/frontend-cook[\\/]scripts[\\/]guard\.mjs/.test(h.command || '')) })).filter((m) => m.hooks.length);
   }
-  j.hooks.PreToolUse.push({ matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash', hooks: [{ type: 'command', command: guardCmd }] });
+  j.hooks.PreToolUse.push({ matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__.*', hooks: [{ type: 'command', command: guardCmd }] });
   j.hooks.UserPromptSubmit.push({ hooks: [{ type: 'command', command: guardCmd }] });
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(j, null, 2) + '\n');
@@ -161,9 +172,24 @@ if (!hs.ok && INSTALL) {
   result.notes.push('The guard hook was just added to .claude/settings.json. Hooks load at session start: restart Claude Code (or review it in /hooks).');
   hs = hookState();
 }
-C.guard_hook = { ok: hs.ok, detail: hs.ok ? `guard hook active in .claude/settings.json (${GUARD})` : 'guard hook not installed in this project. Run preflight.mjs --install (it adds PreToolUse and UserPromptSubmit hooks to .claude/settings.json)' };
+C.guard_hook = {
+  ok: hs.ok,
+  detail: hs.invalid
+    ? `settings.json is not valid JSON (${settingsPath}). Fix or remove it, then run preflight.mjs --install again`
+    : hs.ok ? `guard hook active in .claude/settings.json (${GUARD})` : 'guard hook not installed in this project. Run preflight.mjs --install (it adds PreToolUse and UserPromptSubmit hooks to .claude/settings.json)',
+};
 
-// Browser for stills, audits and motion recordings
+// Browser: with --install, add Playwright and Chromium under ~/.frontend-cook when no Playwright is found.
+if (INSTALL && !args.has('--skip-browser') && !loadPlaywright(cwd)) {
+  const dir = join(homeDir(), '.frontend-cook');
+  mkdirSync(dir, { recursive: true });
+  const pw = run('npm', ['i', '--prefix', dir, 'playwright'], 300000);
+  result.installed.push({ what: 'Playwright', ok: pw.ok, command: `npm i --prefix ${dir} playwright`, out: pw.out.slice(-400) });
+  const cr = run('npx', ['--prefix', dir, 'playwright', 'install', 'chromium'], 600000);
+  result.installed.push({ what: 'Chromium', ok: cr.ok, command: `npx --prefix ${dir} playwright install chromium`, out: cr.out.slice(-400) });
+}
+
+// Browser for stills, audits and motion recordings (re-checked after any install above)
 C.browser = await checkBrowser();
 
 result.ok = Object.values(C).every((c) => c.ok);

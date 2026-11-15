@@ -27,7 +27,7 @@ Optional: `similarity`, 0 to 100, how close the build is to the references in qu
 | 7.0 | Generic. You can tell an AI or a template made it. |
 | 6.0 or less | Visible problems: broken spacing, bad contrast, slop patterns. |
 
-The default bar is **9.2 overall, 8.5 every dimension**, by calibrated median. 8.0 ("good template") is exactly what this skill exists to beat.
+The default bar is **9.2 overall, 8.5 every dimension**, by calibrated median. 8.0 ("good template") is exactly what this skill exists to beat. Lowering the overall bar, the per-dimension floor or the mockup bar needs the user's own words (`--quote`), checked against their messages.
 
 ## Measured beats eyeballed
 
@@ -39,8 +39,9 @@ A build that fails either is not sent to judges. In ROUNDS.md, label every numbe
 
 ## Calibration
 
-- The offset starts at 0 and can only go down.
-- The user gives an estimate below the judges' raw median → `gate.mjs calibrate --user <n>` sets the offset to the gap; every later score is lowered by it. Rescore open rounds.
+- The offset starts at 0 and never goes above 0, so scores are never raised above the judges.
+- The user gives an estimate below the judges' raw median → `gate.mjs calibrate --user <n> --quote "<their words, containing n>"` sets the offset to the gap; every later score is lowered by it. The offset is re-based on each newer round the user rates, so a later higher rating can bring it back up. Rescore open rounds.
+- If the offset makes the bar unreachable, the gate warns. Ask the user to rate the next round.
 - The user gives an estimate above the judges → nothing changes. The gaps the judges named still stand.
 - Blind pair test, when a round scores suspiciously high: give a fresh judge one reference and one still without labels and ask which one is the real production site and why. A confident correct answer names the next focus.
 

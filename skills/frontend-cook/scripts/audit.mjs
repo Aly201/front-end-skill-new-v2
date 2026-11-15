@@ -40,7 +40,7 @@ function inPage({ isMobile, vw }) {
   const lum = ({ r, g, b }) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b); };
   const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
   const blend = (top, bottom) => ({ r: top.r * top.a + bottom.r * (1 - top.a), g: top.g * top.a + bottom.g * (1 - top.a), b: top.b * top.a + bottom.b * (1 - top.a), a: 1 });
-  const visible = (el) => { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 && r.width > 0 && r.height > 0; };
+  const visible = (el) => { const s = getComputedStyle(el); const r = el.getBoundingClientRect(); return s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 && r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.width > 1 && r.height > 1; };
   const sel = (el) => { const parts = []; let e = el; for (let i = 0; e && i < 4 && e !== document.body; i++, e = e.parentElement) { let s = e.tagName.toLowerCase(); if (e.id) { s += `#${e.id}`; parts.unshift(s); break; } const c = [...e.classList].slice(0, 2).join('.'); if (c) s += `.${c}`; parts.unshift(s); } return parts.join(' > '); };
 
   function background(el) {

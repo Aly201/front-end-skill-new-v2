@@ -8,13 +8,19 @@
 //   { "allowed": [ { "id": "em-dash", "quote": "em dashes are fine in the blog copy" } ],
 //     "extra":   [ { "id": "no-blue", "pattern": "#0000ff", "flags": "i", "message": "no pure blue" } ] }
 import { readFileSync, writeFileSync, mkdirSync, statSync, existsSync } from 'node:fs';
-import { dirname, extname, relative } from 'node:path';
-import { walk, isMain } from './_common.mjs';
+import { dirname, extname, relative, resolve } from 'node:path';
+import { walk, isMain, MOTION_CODE, projectRoot, userSaid } from './_common.mjs';
 
 const MARKUP = ['.html', '.htm', '.jsx', '.tsx', '.vue', '.svelte', '.astro', '.md', '.mdx'];
 const SCRIPT = ['.js', '.mjs', '.cjs', '.ts'];
 const STYLE = ['.css', '.scss', '.sass', '.less', '.pcss'];
 const ALL = [...MARKUP, ...SCRIPT, ...STYLE];
+// Files whose <style> blocks and style="" attributes hold CSS that the block rules read.
+const HTML_LIKE = ['.html', '.htm', '.vue', '.svelte', '.astro'];
+// CSS-in-JS files (style objects, template strings).
+const JSX_FILES = ['.js', '.jsx', '.ts', '.tsx'];
+// Files that can name a typeface.
+const TYPE_MARKUP = ['.html', '.htm', '.jsx', '.tsx', '.vue', '.svelte', '.astro'];
 
 // ---------- color helpers ----------
 function hexToRgb(h) {
@@ -51,15 +57,52 @@ export function colorsIn(line) {
   }
   return out;
 }
-export const isBeige = ([h, s, l]) => h >= 25 && h <= 55 && s >= 10 && s <= 70 && l >= 78 && l <= 96;
+// oklch(L C H) with L as a number or a percentage. Tailwind v4 emits this form.
+export function oklchIn(line) {
+  const out = [];
+  for (const m of line.matchAll(/oklch\(\s*([\d.]+)(%?)\s+([\d.]+)\s+([\d.]+)/gi)) {
+    out.push({ text: m[0], L: +m[1] / (m[2] ? 100 : 1), C: +m[3], H: +m[4] });
+  }
+  return out;
+}
+const isOklchBeige = (o) => o.L >= 0.88 && o.C >= 0.008 && o.C <= 0.09 && o.H >= 50 && o.H <= 110;
+const isOklchPurpleGrad = (o) => o.C >= 0.08 && o.H >= 265 && o.H <= 330;
+
+export const isBeige = ([h, s, l]) => h >= 20 && h <= 65 && s >= 8 && l >= 82 && l <= 98.5;
 export const isPurple = ([h, s, l]) => h >= 250 && h <= 300 && s >= 25 && l >= 15 && l <= 85;
+// Used only by the gradient rule: indigo, violet and fuchsia stops.
+export const isPurpleGrad = ([h, s, l]) => h >= 235 && h <= 310 && s >= 25 && l >= 15 && l <= 85;
 const BEIGE_NAMES = /\b(beige|wheat|antiquewhite|linen|oldlace|cornsilk|bisque|blanchedalmond|papayawhip|floralwhite|navajowhite|moccasin)\b/i;
 const TW_BEIGE = /\b(bg|from|via|to)-(stone|amber|orange|yellow)-(50|100)\b/;
 const TW_PURPLE_GRAD = /\b(from|via|to)-(purple|violet|fuchsia|indigo)-\d{2,3}\b/;
 const TW_PURPLE_ACCENT = /\b(bg|text|border|ring)-(purple|violet|indigo)-(400|500|600|700)\b/;
+const PURPLE_MSG = 'Purple / violet gradient.';
+
+// Every gradient(...) in text, with its balanced argument list. at is the index of "gradient(".
+function gradientsIn(text) {
+  const out = [];
+  for (const m of text.matchAll(/gradient\(/gi)) {
+    const start = m.index + m[0].length;
+    let depth = 1, i = start;
+    while (i < text.length && depth > 0 && i - start < 2000) {
+      if (text[i] === '(') depth++;
+      else if (text[i] === ')') depth--;
+      i++;
+    }
+    out.push({ at: m.index, args: text.slice(start, depth === 0 ? i - 1 : i) });
+  }
+  return out;
+}
+// The purple stop inside one gradient's arguments, or null.
+function purpleIn(args) {
+  const c = colorsIn(args).find((x) => isPurpleGrad(x.hsl));
+  if (c) return c.text;
+  const o = oklchIn(args).find(isOklchPurpleGrad);
+  return o ? o.text : null;
+}
 
 // ---------- line rules ----------
-// test(line, ctx) returns a short matched text or null.
+// test(line, ctx) returns a short matched text or null. ctx = { i, lines } gives multi-line rules their neighbours.
 const LINE_RULES = [
   { id: 'em-dash', sev: 'error', files: [...MARKUP, ...SCRIPT], msg: 'Em dash in copy. Use a comma, colon, period or parentheses.',
     test: (l) => (l.match(/—|&mdash;|&#8212;|\\u2014/) || [])[0] },
@@ -71,10 +114,21 @@ const LINE_RULES = [
     test: (l) => (l.match(/\b(unlock(ing)? the (full )?(power|potential)|elevate your|supercharge|revolutioni[sz]e|seamless(ly)?|cutting[- ]edge|game[- ]chang\w*|next[- ]level|unleash|harness the power|in today'?s (fast[- ]paced|digital)|look no further|delve into|transform the way you|effortless(ly)?)\b/i) || [])[0] },
   { id: 'emoji-icon', sev: 'warn', files: MARKUP, msg: 'Emoji used as an icon. Use a real icon set or a drawn mark.',
     test: (l) => { const m = l.match(/(?![©®™])\p{Extended_Pictographic}/u); return m ? m[0] : null; } },
+  // ">05<" alone is usually table data, so it is collected and reported only when the file holds two or more values (see scan).
+  { id: 'counter-01', sev: 'error', files: [...MARKUP, ...SCRIPT], msg: '01 / 02 / 03 counters. Drop the numbering or use a real label.', aggregate: true,
+    test: (l) => (l.match(/>\s*0[1-9]\s*(?:[<.\/]|$)/) || [])[0] },
   { id: 'counter-01', sev: 'error', files: [...MARKUP, ...SCRIPT], msg: '01 / 02 / 03 counters. Drop the numbering or use a real label.',
-    test: (l) => (l.match(/>\s*0[1-9]\s*(?:[<.\/]|$)|padStart\(\s*2\s*,\s*['"]0['"]\s*\)|\b(?:number|num|step|index|count)\s*:\s*['"]0[1-9]['"]/) || [])[0] },
+    test: (l) => (l.match(/padStart\(\s*2\s*,\s*['"]0['"]\s*\)|\b(?:number|num|step|index|count)\s*:\s*['"]0[1-9]['"]|[`'"]0\$\{|\bdecimal-leading-zero\b/) || [])[0] },
   { id: 'eyebrow-label', sev: 'error', files: [...MARKUP, ...SCRIPT], msg: 'Eyebrow label (small uppercase tracked text above a heading).',
     test: (l) => classHas(l, [/\buppercase\b/, /\btracking-(wide|wider|widest|\[)/]) },
+  { id: 'eyebrow-label', sev: 'error', files: JSX_FILES, msg: 'Eyebrow label (small uppercase tracked text above a heading).',
+    test: (l, ctx) => {
+      const m = l.match(/textTransform\s*:\s*['"]uppercase/);
+      if (!m) return null;
+      const lo = Math.max(0, ctx.i - 3), hi = Math.min(ctx.lines.length - 1, ctx.i + 3);
+      for (let j = lo; j <= hi; j++) if (/letterSpacing\s*:/.test(ctx.lines[j])) return m[0];
+      return null;
+    } },
   { id: 'mono-uppercase', sev: 'error', files: [...MARKUP, ...SCRIPT], msg: 'Monospace uppercase text.',
     test: (l) => classHas(l, [/\buppercase\b/, /\bfont-mono\b/]) },
   { id: 'glow-orb', sev: 'error', files: [...MARKUP, ...SCRIPT], msg: 'Blurred glowing orb / blob.',
@@ -85,6 +139,8 @@ const LINE_RULES = [
     test: (l) => (l.match(/tsparticles|particles\.js|react-particles|particlesjs|@tsparticles/i) || [])[0] },
   { id: 'gradient-text', sev: 'error', files: [...MARKUP, ...SCRIPT], msg: 'Gradient-filled headline text.',
     test: (l) => classHas(l, [/\bbg-clip-text\b/, /\btext-transparent\b/]) },
+  { id: 'gradient-text', sev: 'error', files: JSX_FILES, msg: 'Gradient-filled headline text.',
+    test: (l) => (l.match(/(Webkit)?[bB]ackgroundClip\s*:\s*['"]text/) || [])[0] },
   { id: 'sparkles-icon', sev: 'warn', files: [...MARKUP, ...SCRIPT], msg: 'Sparkles icon, the stock "AI" signifier.',
     test: (l) => (l.match(/<Sparkles\b|\bSparklesIcon\b|✨/) || [])[0] },
   { id: 'glass-card', sev: 'warn', files: [...MARKUP, ...SCRIPT], msg: 'Default glassmorphism card (backdrop blur on translucent white).',
@@ -94,12 +150,14 @@ const LINE_RULES = [
       if (BEIGE_NAMES.test(l) && /(color|background|bg|fill|--)/i.test(l)) return l.match(BEIGE_NAMES)[0];
       if (TW_BEIGE.test(l)) return l.match(TW_BEIGE)[0];
       const c = colorsIn(l).find((x) => isBeige(x.hsl));
-      return c ? c.text : null;
+      if (c) return c.text;
+      const o = oklchIn(l).find(isOklchBeige);
+      return o ? o.text : null;
     } },
-  { id: 'purple-gradient', sev: 'error', files: ALL, msg: 'Purple / violet gradient.',
+  { id: 'purple-gradient', sev: 'error', files: ALL, msg: PURPLE_MSG,
     test: (l) => {
       if (TW_PURPLE_GRAD.test(l) && /\b(bg-gradient|bg-linear|bg-radial|from-)/.test(l)) return l.match(TW_PURPLE_GRAD)[0];
-      if (/gradient\(/i.test(l)) { const c = colorsIn(l).find((x) => isPurple(x.hsl)); if (c) return c.text; }
+      for (const g of gradientsIn(l)) { const hit = purpleIn(g.args); if (hit) return hit; }
       return null;
     } },
   { id: 'purple-accent', sev: 'warn', files: ALL, msg: 'Purple as the accent color. Only keep it if the references or the brand use it.',
@@ -132,9 +190,63 @@ const BLOCK_RULES = [
 ];
 
 // Movement that needs a reduced-motion path. Color/opacity-only transitions do not count.
-const MOTION = /@keyframes|\banimation\s*:|\btransition(?:-property)?\s*:[^;}]*\b(transform|translate|scale|rotate|all|top|left|margin|height|width)\b|\btransition-(transform|all)\b|\bgsap\b|framer-motion|motion\/react|\banimate-[a-z]|\blenis\b|useSpring|ScrollTrigger/;
+const MOTION_TRANSITION = /\btransition(?:-property)?\s*:[^;}]*\b(transform|translate|scale|rotate|all|top|left|margin|height|width)\b|\btransition-(transform|all)\b/;
+const isMotion = (t) => MOTION_CODE.test(t) || MOTION_TRANSITION.test(t);
 const REDUCED = /prefers-reduced-motion|useReducedMotion|reducedMotion|motion-safe:|motion-reduce:/;
 const GENERIC_FONTS = new Set(['inter', 'roboto', 'arial', 'helvetica', 'helvetica neue', 'system-ui', '-apple-system', 'blinkmacsystemfont', 'segoe ui', 'sans-serif', 'serif', 'monospace', 'ui-sans-serif', 'ui-serif', 'ui-monospace', 'inherit', 'initial', 'var', 'open sans']);
+
+// Custom properties: "--name: value" declarations, and var(--name) references.
+const VAR_DECL = /(--[\w-]+)\s*:\s*([^;}{]+)/g;
+const VAR_REF = /var\(\s*(--[\w-]+)\s*(?:,[^()]*)?\)/g;
+function expandVars(s, vars) {
+  let out = s;
+  for (let pass = 0; pass < 3; pass++) {
+    const next = out.replace(VAR_REF, (m, name) => (vars.has(name) ? vars.get(name) : m));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+// The text a CSS block rule reads: a whole stylesheet or script, or for HTML-like files the
+// text of each <style> element and each style="" attribute, so separate inline styles never combine.
+function segmentsOf(text, ext) {
+  if (!HTML_LIKE.includes(ext)) return [{ text, offset: 0 }];
+  const segs = [];
+  for (const m of text.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)) {
+    segs.push({ text: m[1], offset: m.index + m[0].indexOf('>') + 1 });
+  }
+  for (const m of text.matchAll(/(?<![\w-])style\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    const v = m[1] ?? m[2];
+    segs.push({ text: v, offset: m.index + m[0].length - 1 - v.length });
+  }
+  return segs;
+}
+
+// Splits a segment on "}" into blocks, each with the absolute offset of its first non-space character.
+function blocksOf(seg) {
+  const out = [];
+  let pos = seg.offset;
+  for (const piece of seg.text.split('}')) {
+    out.push({ text: piece, start: pos + (piece.length - piece.trimStart().length) });
+    pos += piece.length + 1;
+  }
+  return out;
+}
+
+// Offset to 1-based line number for one file.
+function lineMap(text) {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) starts.push(i + 1);
+  return (pos) => {
+    let lo = 0, hi = starts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (starts[mid] <= pos) lo = mid; else hi = mid - 1;
+    }
+    return lo + 1;
+  };
+}
 
 function fontFamilies(text) {
   const fams = new Set();
@@ -161,12 +273,15 @@ function loadBans(path) {
   return { allowed: j.allowed || [], extra: j.extra || [], user_bans: j.user_bans || [] };
 }
 
+const finding = (r, file, line, hit) => ({ id: r.id, severity: r.sev, file, line, text: String(hit).slice(0, 80), message: r.msg });
+
 export function scan(targets, bansPath) {
   const bans = loadBans(bansPath);
   const allowed = new Map();
   const findings = [];
   for (const a of bans.allowed) {
-    if (a && a.id && typeof a.quote === 'string' && a.quote.trim().length >= 8) allowed.set(a.id, a.quote);
+    // The quote must be words the user really typed (the guard hook logs prompts to cook/.ledger.jsonl).
+    if (a && a.id && typeof a.quote === 'string' && a.quote.trim().length >= 8 && userSaid(projectRoot(dirname(resolve(bansPath))), a.quote)) allowed.set(a.id, a.quote);
     else findings.push({ id: 'bans-file', severity: 'error', file: bansPath, line: 0, text: JSON.stringify(a), message: 'A rule was switched off without the user\'s own words (quote, 8+ characters).' });
   }
   const extra = bans.extra.map((e) => ({ id: e.id, sev: e.severity || 'error', files: ALL, msg: e.message || `User ban: ${e.id}`,
@@ -179,40 +294,70 @@ export function scan(targets, bansPath) {
     let st; try { st = statSync(t); } catch { findings.push({ id: 'missing-target', severity: 'error', file: t, line: 0, text: '', message: 'Path does not exist.' }); continue; }
     if (st.isDirectory()) files.push(...walk(t, ALL)); else files.push(t);
   }
-  let anyMotion = false, anyReduced = false;
+
+  // Read everything first: custom properties are collected across all scanned files before any color test.
+  const docs = files.map((f) => ({ f, ext: extname(f).toLowerCase(), text: readFileSync(f, 'utf8') }));
+  const vars = new Map();
+  for (const d of docs) for (const m of d.text.matchAll(VAR_DECL)) vars.set(m[1], m[2].trim());
+  const expand = (s) => expandVars(s, vars);
+
+  let anyMotion = false, anyReduced = false, markupScanned = false;
   const fams = new Set();
-  for (const f of files) {
-    const ext = extname(f).toLowerCase();
-    const text = readFileSync(f, 'utf8');
-    if (MOTION.test(text)) anyMotion = true;
+  for (const { f, ext, text } of docs) {
+    if (isMotion(text)) anyMotion = true;
     if (REDUCED.test(text)) anyReduced = true;
+    if (TYPE_MARKUP.includes(ext)) markupScanned = true;
     for (const x of fontFamilies(text)) fams.add(x);
+
+    // Line rules. A rule that misses the raw line gets a second try on the line with vars expanded.
     const lines = text.split('\n');
+    const skipComments = SCRIPT.includes(ext) || STYLE.includes(ext);
+    const counted = [];
     lines.forEach((line, i) => {
-      const trimmed = line.trim();
-      if ((SCRIPT.includes(ext) || STYLE.includes(ext)) && /^(\/\/|\*|\/\*)/.test(trimmed)) return;
+      if (skipComments && /^(\/\/|\*|\/\*)/.test(line.trim())) return;
+      const probe = line.includes('var(') ? expand(line) : line;
+      const ctx = { i, lines };
       for (const r of rules) {
         if (!r.files.includes(ext)) continue;
-        const hit = r.test(line);
-        if (hit) findings.push({ id: r.id, severity: r.sev, file: f, line: i + 1, text: String(hit).slice(0, 80), message: r.msg });
+        const hit = r.test(line, ctx) || (probe !== line ? r.test(probe, ctx) : null);
+        if (!hit) continue;
+        if (r.aggregate) counted.push({ r, line: i + 1, hit });
+        else findings.push(finding(r, f, i + 1, hit));
       }
     });
-    if (STYLE.includes(ext) || ['.html', '.htm', '.vue', '.svelte', '.astro'].includes(ext)) {
-      let offset = 0;
-      for (const block of text.split('}')) {
-        const startLine = text.slice(0, offset).split('\n').length + (block.match(/^\s*\n*/)?.[0].split('\n').length || 1) - 1;
-        offset += block.length + 1;
-        for (const r of blockRules) {
-          if (r.test(block)) findings.push({ id: r.id, severity: r.sev, file: f, line: startLine, text: block.trim().split('{')[0].trim().slice(0, 80), message: r.msg });
+    if (new Set(counted.map((c) => c.hit.replace(/\D/g, ''))).size >= 2) {
+      for (const c of counted) findings.push(finding(c.r, f, c.line, c.hit));
+    }
+
+    // Block rules: CSS, and the CSS parts of HTML-like files.
+    const lineOf = lineMap(text);
+    const segs = segmentsOf(text, ext);
+    if (STYLE.includes(ext) || HTML_LIKE.includes(ext)) {
+      for (const seg of segs) for (const b of blocksOf(seg)) for (const r of blockRules) {
+        if (r.test(b.text)) findings.push({ id: r.id, severity: r.sev, file: f, line: lineOf(b.start), text: b.text.trim().split('{')[0].trim().slice(0, 80), message: r.msg });
+      }
+    }
+    // Purple gradients may span lines: newlines become spaces (length kept), vars are expanded.
+    // Skipped when the line rules already flagged this file.
+    const lineIds = new Set(findings.filter((x) => x.file === f).map((x) => x.id));
+    if (!allowed.has('purple-gradient') && !lineIds.has('purple-gradient')) {
+      for (const seg of segs) {
+        const flat = seg.text.replace(/[\r\n]/g, ' ');
+        for (const g of gradientsIn(flat)) {
+          const hit = purpleIn(expand(g.args));
+          if (hit) findings.push({ id: 'purple-gradient', severity: 'error', file: f, line: lineOf(seg.offset + g.at), text: hit.slice(0, 80), message: PURPLE_MSG });
         }
       }
     }
   }
+
   if (anyMotion && !anyReduced && !allowed.has('reduced-motion')) {
     findings.push({ id: 'reduced-motion', severity: 'error', file: '(project)', line: 0, text: '', message: 'Animations exist but nothing honors prefers-reduced-motion.' });
   }
   const named = [...fams].filter((f) => !GENERIC_FONTS.has(f));
-  if (files.length && fams.size && !named.length && !allowed.has('default-typeface')) {
+  if (files.length && !fams.size && markupScanned && !allowed.has('default-typeface')) {
+    findings.push({ id: 'default-typeface', severity: 'error', file: '(project)', line: 0, text: 'no typeface set', message: 'No font family is set. Pick type from the references.' });
+  } else if (files.length && fams.size && !named.length && !allowed.has('default-typeface')) {
     findings.push({ id: 'default-typeface', severity: 'warn', file: '(project)', line: 0, text: [...fams].join(', '), message: 'Only default typefaces (Inter / Roboto / system). Pick type from the references.' });
   }
   if (named.length > 3 && !allowed.has('font-sprawl')) {
@@ -247,7 +392,7 @@ if (isMain(import.meta.url)) {
   const targets = argv.filter((a, i) => !a.startsWith('--') && !skip.has(argv[i - 1]));
   if (!targets.length) { console.error('usage: node slop_scan.mjs <dir-or-file>... [--out report.json] [--bans cook/bans.json] [--json]'); process.exit(2); }
   const report = scan(targets, bansPath);
-  report.targets = targets;
+  report.targets = targets.map((t) => resolve(t));
   const out = opt('--out');
   if (out) { mkdirSync(dirname(out), { recursive: true }); writeFileSync(out, JSON.stringify(report, null, 2) + '\n'); }
   if (argv.includes('--json')) console.log(JSON.stringify(report, null, 2));

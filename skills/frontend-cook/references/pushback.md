@@ -24,18 +24,20 @@ Do this, in one short message:
    - a ban: add `{ "id": "...", "quote": "<their words>" }` to `allowed` in `cook/bans.json`
    - a step: `gate.mjs override <step> --quote "<their words>" --reason "<why>"`
    - the bar: `gate.mjs set-bar --judge <n> --quote "<their words>"`
+   - a time cap, or a floor under 2h: `gate.mjs set-time ... --quote "<their words>"`
    - no motion: `gate.mjs set-motion --none --quote "<their words>"`
+   The gate checks each quote against the prompts the guard hook logged in `cook/.ledger.jsonl`, so the words must be in a message they actually typed in this project.
 4. **Do not repeat the argument.** Once they decided, do it well. The override is logged and shows up in the final report, which is enough.
 
-Never invent the user's words, paraphrase them into a stronger yes, or record a yes they did not give.
+Never invent the user's words, paraphrase them into a stronger yes, or record a yes they did not give. Paste their words exactly.
 
 ## When the user praises the work
 
-"Wow, this is perfect." Thank them in a few words. Then still run the judges and the checks, and report the numbers as they are: "Thanks. The judges have it at 8.6, the bar is 9.2; the weakest part is mobile typography (7.9). I'll fix that next." Praise is not approval. Approval is the user saying they approve this specific gate (mockup, static, final), recorded with `gate.mjs approve`.
+"Wow, this is perfect." Thank them in a few words. Then still run the judges and the checks, and report the numbers as they are: "Thanks. The judges have it at 8.6, the bar is 9.2; the weakest part is mobile typography (7.9). I'll fix that next." Praise is not approval. Approval is the user saying they approve this specific gate (mockup, static, final), in words they typed, recorded with `gate.mjs approve`. It expires if the stills change after it.
 
 ## When the user is harsher than the judges
 
-They are right until shown otherwise. `gate.mjs calibrate --user <their number>` lowers every later score by the gap. Ask them (once) what they see, or describe how the part was built so they can point at it (`feedback.md`).
+They are right until shown otherwise. `gate.mjs calibrate --user <their number> --quote "<their words, containing that number>"` lowers every later score by the gap. The offset is re-based on each newer round they rate, and never goes above the judges. If the offset makes the bar unreachable, the gate says so: ask them to rate the next round. Ask them (once) what they see, or describe how the part was built so they can point at it (`feedback.md`).
 
 ## When the user is kinder than the judges
 
