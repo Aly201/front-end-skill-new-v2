@@ -74,7 +74,7 @@ test('gates refuse until proof exists, then pass in order', () => {
 
   // Step 4: time
   assert.equal(gate('verify', '4').code, 1);
-  assert.equal(gate('set-time', '--floor', '0').code, 0);
+  assert.equal(gate('set-time', '--cap', '2h').code, 0);
   assert.equal(gate('verify', '4').code, 0);
 
   // Step 5: bans
@@ -93,6 +93,12 @@ test('gates refuse until proof exists, then pass in order', () => {
   judges('r01', 8.9);
   gate('score', 'r01');
   gate('approve', 'static', '--quote', 'static looks good, go on');
+  // Animation code in the static build is refused.
+  write(join(proj, 'site', 'anim.css'), 'h1 { animation: rise 1s; }');
+  assert.match(gate('verify', '6a').out, /animation code in the static build/);
+  write(join(proj, 'site', 'anim.css'), 'a { transition: color .2s; }');
+  for (const p of ['S01-desktop.png', 'S01-mobile.png']) later(cook('stills', 'r01', p));
+  slop(join(proj, 'site'), cook('reports', 'slop-r01.json')); later(cook('reports', 'slop-r01.json')); later(cook('reports', 'audit-r01.json'));
   assert.match(gate('verify', '6a').out, /overall 8\.8\/10 calibrated \(bar 9\.2/, 'below the bar is refused');
   judges('r01', 9.6);
   gate('score', 'r01');
@@ -112,15 +118,24 @@ test('gates refuse until proof exists, then pass in order', () => {
   assert.equal(gate('verify', '6b').code, 0, gate('verify', '6b').out);
 
   // Step 7: feedback
-  write(cook('ROUNDS.md'), '# Ledger\n\n## User feedback inbox\n\n- 10:00 "hero type bigger" | round 1 | open\n\n---\n\n## Round 01\n');
+  write(cook('SECTIONS.md'), '## S1 Hero\nBuilt: 96px headline.\n'); later(cook('SECTIONS.md'));
+  write(cook('ROUNDS.md'), '# Ledger\n\n## User feedback inbox\n\n---\n\n## Round 01\n');
+  assert.match(gate('verify', '7').out, /no feedback recorded/, 'zero feedback needs the user words');
+  write(cook('ROUNDS.md'), '# Ledger\n\n## User feedback inbox\n\n- 10:00 "hero type bigger" | S1: 72px -> 96px | round 1 | open\n\n---\n\n## Round 01\n');
   assert.equal(gate('verify', '7').code, 1, 'open feedback blocks step 7');
-  write(cook('ROUNDS.md'), '# Ledger\n\n## User feedback inbox\n\n- 10:00 "hero type bigger" | round 1 | done, proof: cook/stills/r01/S01-desktop.png\n\n---\n\n## Round 01\n');
-  write(cook('SECTIONS.md'), '1. Hero\n'); later(cook('SECTIONS.md'));
+  write(cook('ROUNDS.md'), '# Ledger\n\n## User feedback inbox\n\n- 10:00 "hero type bigger" | headline bigger | round 1 | done, proof: cook/stills/r01/S01-desktop.png\n\n---\n\n## Round 01\n');
+  assert.match(gate('verify', '7').out, /not pinned to a section/, 'feedback must name a section');
+  write(cook('ROUNDS.md'), '# Ledger\n\n## User feedback inbox\n\n- 10:00 "hero type bigger" | S1: 72px -> 96px | round 1 | done, proof: cook/stills/r01/S01-desktop.png\n\n---\n\n## Round 01\n');
   assert.equal(gate('verify', '7').code, 0, gate('verify', '7').out);
 
   // Step 8: separate judge, calibration, final approval
   assert.equal(gate('verify', '8').code, 1, 'no final approval yet');
   gate('approve', 'final', '--quote', 'approved, ship it');
+  // The separate judge is proven by the guard ledger, not by the judge file.
+  const ev = (session, file) => JSON.stringify({ at: new Date().toISOString(), session_id: session, tool: 'Write', file }) + '\n';
+  write(cook('.ledger.jsonl'), ev('builder', 'site/index.html') + ev('builder', 'cook/judge/r01/judge-b.json'));
+  assert.match(gate('verify', '8').out, /no judge file in r01 was written from a separate session/);
+  write(cook('.ledger.jsonl'), ev('builder', 'site/index.html') + ev('builder', 'cook/judge/r01/judge-a.json') + ev('judge-session', 'cook/judge/r01/judge-b.json'));
   assert.equal(gate('verify', '8').code, 0, gate('verify', '8').out);
 
   // The user's kinder estimate never raises scores; a harsher one lowers them.
@@ -138,4 +153,27 @@ test('override is logged with the unmet requirements and needs the user words', 
   assert.match(r.out, /OVERRIDDEN/);
   const g = JSON.parse(readFileSync(cook('GATES.json'), 'utf8'));
   assert.ok(g.overrides['8'].unmet.length > 0);
+});
+
+test('motion must come from references, with saved evidence from any tool', () => {
+  const p2 = mkdtempSync(join(tmpdir(), 'fecook-m-'));
+  const g2 = (...a) => { const r = spawnSync(process.execPath, [join(SCRIPTS, 'gate.mjs'), ...a], { cwd: p2, encoding: 'utf8' }); return r.stdout + r.stderr; };
+  const c2 = (...p) => join(p2, 'cook', ...p);
+  write(c2('PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  g2('init', '--project', 'M');
+  const row = (ref, how) => `| ${ref} | 0:02 | hero lines | ${how} | reads in order | S1 |`;
+  const head = '| Ref | Time | What moves | How | Why | Use in |\n|---|---|---|---|---|---|\n';
+  write(c2('MOTION.md'), head + [1, 2, 3, 4, 5].map(() => row('V01', 'fades in nicely')).join('\n'));
+  let out = g2('verify', '6b');
+  assert.match(out, /without a measured duration and easing/);
+  assert.match(out, /from 1 reference/);
+  assert.match(out, /V01: no motion evidence/);
+  write(c2('MOTION.md'), head + ['V01', 'V01', 'R03', 'R03', 'R03'].map((r) => row(r, '700ms, cubic-bezier(.2,.7,.2,1), 24px up')).join('\n'));
+  write(c2('refs', 'V01.mp4'), 'x');                                // the user's own video
+  write(c2('refs', 'motion', 'R03-motion-dna.json'), '{}');         // any tool's extraction output
+  out = g2('verify', '6b');
+  assert.match(out, /PASS {2}every effect has a duration and an easing/);
+  assert.match(out, /PASS {2}V01: motion evidence V01\.mp4/);
+  assert.match(out, /PASS {2}R03: motion evidence R03-motion-dna\.json/);
+  assert.match(out, /PASS {2}effects taken from 2 reference/);
 });

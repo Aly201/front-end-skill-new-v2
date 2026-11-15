@@ -131,7 +131,8 @@ const BLOCK_RULES = [
     test: (b) => /background-clip\s*:\s*text/i.test(b) && /gradient\(/i.test(b) },
 ];
 
-const MOTION = /@keyframes|\banimation\s*:|\btransition\s*:|\bgsap\b|framer-motion|motion\/react|\banimate-[a-z]|\blenis\b|useSpring|ScrollTrigger/;
+// Movement that needs a reduced-motion path. Color/opacity-only transitions do not count.
+const MOTION = /@keyframes|\banimation\s*:|\btransition(?:-property)?\s*:[^;}]*\b(transform|translate|scale|rotate|all|top|left|margin|height|width)\b|\btransition-(transform|all)\b|\bgsap\b|framer-motion|motion\/react|\banimate-[a-z]|\blenis\b|useSpring|ScrollTrigger/;
 const REDUCED = /prefers-reduced-motion|useReducedMotion|reducedMotion|motion-safe:|motion-reduce:/;
 const GENERIC_FONTS = new Set(['inter', 'roboto', 'arial', 'helvetica', 'helvetica neue', 'system-ui', '-apple-system', 'blinkmacsystemfont', 'segoe ui', 'sans-serif', 'serif', 'monospace', 'ui-sans-serif', 'ui-serif', 'ui-monospace', 'inherit', 'initial', 'var', 'open sans']);
 

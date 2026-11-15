@@ -15,6 +15,7 @@
 //   set-time (--floor 3h | --cap 1.5h)
 //   set-build --src <dir> --url <url or file>
 //   set-motion (--none --quote "..." | --refs)
+//   no-feedback --quote "..."           the user saw the stills and wants no changes (step 7)
 //   score <round>                         median of the judge files in cook/judge/<round>/, calibrated
 //   calibrate --user <score 0-10>         the user's estimate; only ever lowers scores
 //   elapsed                               hours since the timer started
@@ -23,7 +24,7 @@
 //        6b motion, 7 feedback, 8 separate judge.
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
-import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR } from './_common.mjs';
+import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, MOTION_CODE, FRONTEND_EXT, readLedger, activeHours } from './_common.mjs';
 
 export const STEPS = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 export const STEP_NAMES = {
@@ -199,6 +200,8 @@ function doneChecks(g, step) {
       const cmp = (() => { try { return readdirSync(S('compare', 'mockup')).filter((f) => /\.(jpe?g|png)$/i.test(f)); } catch { return []; } })();
       out.push([cmp.length > 0, cmp.length ? 'side-by-side with the references exists' : 'no side-by-side in cook/compare/mockup (cook/scripts/side-by-side.mjs)']);
       out.push(C.reportOk('slop-mockup.json', newest, 'slop scan of the mockup'));
+      const anim = motionCodeIn(files);
+      out.push([anim.length === 0, anim.length ? `animation code in the mockup (it must be static): ${anim.join(', ')}` : 'mockup is static']);
       out.push(...judgeChecks(g, 'mockup', 'mockup', newest));
       out.push(C.approval(g, 'mockup'));
       break;
@@ -232,6 +235,8 @@ function doneChecks(g, step) {
       out.push([Boolean(r), r ? `latest round ${r}` : 'no round yet (cook/judge/r01/...)']);
       if (!r) break;
       out.push(...roundEvidence(g, r, newest, false));
+      const anim = motionCodeIn(files);
+      out.push([anim.length === 0, anim.length ? `animation code in the static build (motion waits for step 6b): ${anim.slice(0, 5).join(', ')}` : 'no animation code in the static build (hover/focus transitions only)']);
       out.push(...judgeChecks(g, r, 'static', newest));
       out.push(C.approval(g, 'static'));
       break;
@@ -239,8 +244,28 @@ function doneChecks(g, step) {
     case '6b': {
       if (g.motion === 'none') { out.push([quoteOk(g.motion_quote), `no motion, user said: "${g.motion_quote || ''}"`]); break; }
       const motion = (() => { try { return readFileSync(S('MOTION.md'), 'utf8'); } catch { return ''; } })();
-      const effects = motion.split('\n').filter((l) => /^\s*(-|\|\s*[^-\s|])/.test(l) && !/^\s*\|\s*(Ref|Effect|Reference)\b/i.test(l)).length;
-      out.push([effects >= 5, `MOTION.md lists ${effects} effect(s) taken from the motion references (need 5+, timings and easing included)`]);
+      const rows = motion.split('\n').filter((l) => /^\s*\|/.test(l) && !/^\s*\|[\s:|-]+\|?\s*$/.test(l) && !/^\s*\|\s*(Ref|Effect|Reference)\b/i.test(l) && !/\|\s*\[[^\]|]+\]\s*\|/.test(l));
+      out.push([rows.length >= 5, `MOTION.md lists ${rows.length} effect(s) (need 5+ table rows)`]);
+      const evidence = (() => { try { return readdirSync(S('refs', 'motion')); } catch { return []; } })();
+      const refsDir = (() => { try { return readdirSync(S('refs')); } catch { return []; } })();
+      const cited = new Set();
+      let vague = 0, unsourced = [];
+      for (const row of rows) {
+        const cells = row.split('|').map((c) => c.trim()).filter((c, i, a) => i > 0 && i < a.length - 1);
+        const id = (cells[0] || '').toUpperCase();
+        const how = cells[3] || '';
+        if (!/\d+(\.\d+)?\s*(ms|s)\b/i.test(how) || !/(ease|cubic-bezier|linear|spring|power\d|expo|sine|quad|cubic|quart|quint|circ|back|elastic|steps)/i.test(how)) vague++;
+        if (!/^(R|V)\d{2,}$/.test(id)) { unsourced.push(id || '(empty)'); continue; }
+        cited.add(id);
+      }
+      out.push([vague === 0 && rows.length > 0, vague ? `${vague} effect(s) without a measured duration and easing in the "How" column (e.g. "700ms, cubic-bezier(.2,.7,.2,1), 24px up")` : 'every effect has a duration and an easing']);
+      out.push([unsourced.length === 0, unsourced.length ? `effects not tied to a reference id (R01 / V01): ${[...new Set(unsourced)].join(', ')}` : 'every effect cites a reference']);
+      out.push([cited.size >= 2, `effects taken from ${cited.size} reference(s) (need 2+: take from many, copy none)`]);
+      for (const id of cited) {
+        // Evidence: the user's video (refs/V01.*), a recording, or any tool's extraction output in refs/motion/<ID>*.
+        const files = [...refsDir.filter((f) => f.toUpperCase().startsWith(id) && /\.(mp4|webm|mov|gif)$/i.test(f)), ...evidence.filter((f) => f.toUpperCase().startsWith(id))];
+        out.push([files.length > 0, files.length ? `${id}: motion evidence ${files.slice(0, 3).join(', ')}` : `${id}: no motion evidence. Save what you extracted (recording, frames, get_motion_dna / analyze_scroll_map output, any tool's notes) as cook/refs/motion/${id}-<what>.<ext>`]);
+      }
       const files = srcFiles(g);
       const newest = newestMtime(files);
       const r = latestRound();
@@ -255,6 +280,14 @@ function doneChecks(g, step) {
       const inbox = (led.split(/^##\s+User feedback inbox/m)[1] || '').split(/^(?:##|---)/m)[0];
       const items = inbox.split('\n').filter((l) => /^\s*-\s+\S/.test(l) && !/\[quote\]/.test(l));
       const open = items.filter((l) => /\|\s*open\b/i.test(l));
+      const sections = (() => { try { return readFileSync(S('SECTIONS.md'), 'utf8'); } catch { return ''; } })();
+      const known = new Set([...sections.matchAll(/^#+\s*S(\d+)\b/gm)].map((m) => `S${Number(m[1])}`));
+      if (items.length === 0) out.push([quoteOk(g.no_feedback_quote), g.no_feedback_quote ? `no changes requested, user said: "${g.no_feedback_quote}"` : 'no feedback recorded. Send the stills and SECTIONS.md and ask for feedback; if the user wants no changes: gate.mjs no-feedback --quote "<their words>"']);
+      for (const l of items) {
+        const ids = [...l.split(/proof:/i)[0].matchAll(/\bS(\d+)\b/g)].map((m) => `S${Number(m[1])}`);
+        const ok = ids.length > 0 && ids.every((x) => known.has(x));
+        out.push([ok, ok ? `feedback pinned to ${ids.join(', ')}` : `feedback not pinned to a section in SECTIONS.md (write S1, S2...): ${l.trim().slice(0, 60)}`]);
+      }
       out.push([open.length === 0, open.length ? `${open.length} open feedback item(s): ${open.map((l) => l.trim().slice(0, 70)).join(' / ')}` : `${items.length} feedback item(s), none open`]);
       for (const l of items.filter((x) => /\|\s*done\b/i.test(x))) {
         const pr = (l.match(/proof:\s*([^\s|]+)/i) || [])[1];
@@ -271,15 +304,48 @@ function doneChecks(g, step) {
       if (!r) { out.push([false, 'no round yet']); break; }
       out.push(...roundEvidence(g, r, newest, g.motion !== 'none'));
       out.push(...judgeChecks(g, r, 'final', newest));
-      const s = summaryFor(r);
-      if (s) out.push([s.different_model === true || quoteOk(g.single_model_quote), s.different_model ? 'at least one judge ran on a different model or in a separate session' : 'every judge ran on the builder\'s model in this session: add one from a different model or a separate session (/frontend-cook-judge)']);
-      if (g.time?.mode === 'floor') { const h = hoursElapsed(g); out.push([h >= g.time.hours, `${h.toFixed(1)}h elapsed (floor ${g.time.hours}h). Done before the floor means the bar was read too low`]); }
+      // Separate judge, proven by the guard hook's ledger: a judge file in this round written
+      // by a session that never edited the build or the mockup.
+      const ledger = readLedger(root);
+      const builders = builderSessions();
+      const judgeWrites = ledger.filter((e) => e.file && e.file.startsWith(`cook/judge/${r}/`) && !e.file.endsWith('summary.json'));
+      const separate = [...new Set(judgeWrites.filter((e) => e.session_id && !builders.has(e.session_id)).map((e) => e.file))];
+      out.push([ledger.length > 0, ledger.length ? 'guard hook ledger present' : 'no ledger: the guard hook is not installed (run /frontend-cook-setup)']);
+      out.push([separate.length > 0, separate.length ? `separate-session judge verified: ${separate.join(', ')}` : `no judge file in ${r} was written from a separate session (one that never edited the build). Open a new Claude Code session here and run /frontend-cook-judge ${r}`]);
+      if (g.time?.mode === 'floor') {
+        const act = activeHours(ledger.filter((e) => builders.has(e.session_id) || (e.file || '').startsWith('cook/')));
+        out.push([act >= g.time.hours, `${act.toFixed(1)}h of active work logged (floor ${g.time.hours}h; idle gaps over 15 min do not count). Done before the floor means the bar was read too low`]);
+        const n = rounds().length;
+        out.push([n >= 3, `${n} judged round(s) (need 3+ before shipping)`]);
+      }
       out.push(C.approval(g, 'final'));
       break;
     }
     default: fail(`unknown step ${step}. Steps: ${STEPS.join(', ')}`);
   }
   return out;
+}
+
+// Files (and first line) that contain animation code.
+function motionCodeIn(files) {
+  const hits = [];
+  for (const f of files) {
+    if (!FRONTEND_EXT.includes(extname(f).toLowerCase())) continue;
+    const lines = readFileSync(f, 'utf8').split('\n');
+    const i = lines.findIndex((l) => MOTION_CODE.test(l));
+    if (i >= 0) hits.push(`${f.replace(root + '/', '')}:${i + 1}`);
+  }
+  return hits;
+}
+
+// Sessions that edited the build or the mockup: the builders.
+function builderSessions() {
+  const ids = new Set();
+  for (const e of readLedger(root)) {
+    if (!e.session_id || !e.file || e.tool === 'Bash') continue;
+    if (!e.file.startsWith('cook/') || e.file.startsWith('cook/mockup/')) ids.add(e.session_id);
+  }
+  return ids;
 }
 
 function roundEvidence(g, r, newest, needVideo) {
@@ -470,6 +536,13 @@ if (isMainRun) {
         g.motion = 'none'; g.motion_quote = opt('--quote');
       } else g.motion = 'refs';
       save(g); console.log(`motion: ${g.motion}`);
+      break;
+    }
+    case 'no-feedback': {
+      const g = load();
+      if (!quoteOk(opt('--quote'))) fail('no-feedback needs the user\'s words: --quote "..."');
+      g.no_feedback_quote = opt('--quote'); save(g);
+      console.log(`recorded: user wants no changes: "${g.no_feedback_quote}"`);
       break;
     }
     case 'score': {

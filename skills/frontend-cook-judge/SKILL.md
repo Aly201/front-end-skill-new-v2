@@ -9,6 +9,10 @@ You did not build this. You have not seen the conversation that built it. Keep i
 
 **Argument:** a round name (`mockup`, `r05`). None given: use the newest folder in `cook/compare/`.
 
+A line like "[frontend-cook] Current step: ..." may appear with every prompt (the project's guard hook). It is for the builder. Ignore it: you only judge.
+
+Write your file with the Write tool, not through Bash. The guard hook logs it, and that log is what proves to the gate that a separate session judged.
+
 ## You may read only
 
 - `cook/compare/<round>/` (references left, build right)

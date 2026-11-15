@@ -5,8 +5,8 @@ The builder never scores its own work. Judges are fresh: no history, no code, no
 ## How to run them
 
 - **Subagents (default):** start each one with the Agent tool as a new agent (not a fork: a fork inherits your context). Give it only the prompt below and the image paths. Use at least 2 per round, 3+ for step 8. Where the harness lets you pick the model, put at least one judge on a different model from yours.
-- **Separate session (step 8, strongly preferred):** the user opens a new Claude Code session in the project and runs `/frontend-cook-judge <round>`. That judge has never seen the conversation. It writes its file with `"session": "separate"`.
-- **No subagents and no second session:** the run cannot pass step 8. Say so; do not self-score.
+- **Separate session (required for step 8):** the user opens a new Claude Code session in the project and runs `/frontend-cook-judge <round>`. That judge has never seen the conversation. The gate does not trust the file's own `"session"` field: it checks the guard log (`cook/.ledger.jsonl`) for a judge file written by a session that never edited the build or the mockup.
+- **No second session:** the run cannot pass step 8. Say so; do not self-score.
 
 ## What a judge gets
 
@@ -44,7 +44,7 @@ Write ONLY this JSON to [cook/judge/<round>/judge-<letter>.json]:
  "slop_seen":[],"would_ship":false}
 ```
 
-Set `"different_model": true` in a judge's file when it ran on a different model from the builder.
+Set `"different_model": true` in a judge's file when it ran on a different model from the builder. It is recorded but not proof: only the separate session is verified.
 
 ## After the judges
 

@@ -1,38 +1,42 @@
-# Step 6b: motion, from reference videos
+# Step 6b: motion, taken from references
 
-Static first, motion second. A layout that fails as a still will not be saved by animation, and animating an unfinished layout wastes the work when the layout changes. Motion starts only after step 6a passed and the user approved the static stills.
+Static first, motion second (the guard hook blocks animation code until step 6a passed). A layout that fails as a still will not be saved by animation, and animating an unfinished layout wastes the work when the layout changes. Motion starts only after step 6a passed and the user approved the static stills.
 
 ## 1. Get motion references
 
-- 3 to 6 sites whose motion the user likes or that lead the references. Awwwards `get_motion_dna` (libraries, ScrollTrigger use, easing and duration vocabulary) and `search_sites` with motion-heavy tags help find and read them.
-- Record each one the same way the build will be recorded:
-  ```bash
-  node <skill>/scripts/shoot.mjs https://motion-ref.com --out cook/refs --name V01 --live --video 12 --viewports desktop
-  ```
-  This writes `V01-motion.webm` and a filmstrip `V01-motion-strip.jpg`. User-supplied videos go in `cook/refs/` as V01, V02...
+The user can hand over references in any form: site URLs, screen recordings, a folder of videos, or just "the motion on R02 and R05". Use them first. If they gave none, pick 3 to 6 sites whose motion fits the references (Awwwards `search_sites` with motion-heavy tags, Inspo exemplars).
 
-## 2. Analyze frame by frame
+- User videos go in `cook/refs/` as `V01.mp4`, `V02.webm`...
+- Sites keep their R or V id from SOURCES.md.
 
-"Things fade in" is 1% of what a reference holds. Use cook's method (`<cook>/references/target-and-bar.md`, "Motion references"):
+## 2. Extract the motion, with any tool or skill that works
 
-```bash
-ffmpeg -i cook/refs/V01-motion.webm -vf fps=10 cook/refs/V01/f_%04d.png
-```
+Pick whatever gets the most exact numbers. Examples, not a required list:
 
-Around a transition, extract every frame of that range (`-ss`/`-to`, no fps filter) and measure: how many frames it takes (duration), how the position changes per frame (easing), what moves first (stagger, order).
+| Tool | Gives you |
+|---|---|
+| `shoot.mjs <url> --out cook/refs/motion --name V01 --live --video 12` | a scroll-through recording and a filmstrip |
+| ffmpeg on any video (`ffmpeg -i V01.mp4 -vf fps=10 cook/refs/motion/V01-frames/f_%04d.png`) | frames to measure duration, distance, stagger (cook's method, `<cook>/references/target-and-bar.md`) |
+| Awwwards `get_motion_dna` | animation libraries, ScrollTrigger use, easing and duration vocabulary |
+| Awwwards `analyze_scroll_map`, `analyze_hover_census`, `record_site_motion` | per-element scroll triggers, hover recipes with timings, recordings (need Playwright in the MCP's install) |
+| any other installed skill, MCP or browser tool | whatever it measures |
+
+**Save what each tool produced** in `cook/refs/motion/`, named after the reference: `V01-frames/`, `R03-motion-dna.json`, `R05-hover-census.md`, `R02-notes.md` (your measurements from frames). The gate checks that every reference cited in MOTION.md has evidence there (or a user video in `cook/refs/`). No evidence means the motion was invented, and the step fails.
+
+"Things fade in" is 1% of what a reference holds. Measure: how many frames a move takes, how position changes per frame (easing), what moves first (order, stagger), how far it travels.
 
 ## 3. Write `cook/MOTION.md`
 
-One line per effect (the gate needs at least 5):
+One table row per effect. The gate needs 5+ rows, from 2+ references, each with a reference id in the first column and a duration plus an easing in the "How" column:
 
 ```text
 | Ref | Time | What moves | How (duration, easing, distance, stagger) | Why it works | Use in |
 |---|---|---|---|---|---|
-| V01 | 0:02 | hero headline lines | 700ms, cubic-bezier(.2,.7,.2,1), 24px up, 80ms stagger per line | reads in order, feels heavy | hero |
-| V02 | 0:05 | nav on scroll | hides after 120px down, back on up, 250ms | content first | nav |
+| V01 | 0:02 | hero headline lines | 700ms, cubic-bezier(.2,.7,.2,1), 24px up, 80ms stagger per line | reads in order, feels heavy | S1 |
+| R03 | scroll | nav on scroll | hides after 120px down, back on up, 250ms ease-out | content first | S0 |
 ```
 
-Pick a small core (5 to 10 effects that carry the feel) and a set of small ones (hover states, focus, press). Take from many references, never one effect copied 1:1.
+Pick a small core (5 to 10 effects that carry the feel) and a set of small ones (hover, focus, press). Take from many references, never one effect copied 1:1.
 
 ## 4. Build rules
 

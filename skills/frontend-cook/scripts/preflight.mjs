@@ -2,13 +2,14 @@
 // Checks everything frontend-cook needs, and with --install adds what is missing.
 //
 // Usage: node preflight.mjs [--install] [--write] [--json] [--skip-browser]
-//   --install   install the cook skill and add the Inspo and Awwwards MCP servers
+//   --install   install the cook skill, add the Inspo and Awwwards MCP servers and the guard hook
 //   --write     save the result to cook/PREFLIGHT.json (the gate for step 1 reads it)
 //   --json      print JSON only
 //
 // Exit code 0 only when every required check passes.
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { findSkill, loadPlaywright, launchBrowser, homeDir, STATE_DIR } from './_common.mjs';
 
@@ -131,6 +132,36 @@ for (const key of Object.keys(MCPS)) {
     detail: hit ? `${key} MCP configured as "${hit.name}" in ${hit.where}` : `${key} MCP not configured (${MCPS[key].why}). Run: claude ${MCPS[key].claudeAdd.join(' ')}`,
   };
 }
+
+// Guard hook in the project's .claude/settings.json: enforces mockup-first and static-first,
+// protects script-written files and logs activity for the separate-judge and time checks.
+const GUARD = join(dirname(fileURLToPath(import.meta.url)), 'guard.mjs');
+const guardCmd = `node "${GUARD}"`;
+const settingsPath = join(cwd, '.claude', 'settings.json');
+function hookState() {
+  const j = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
+  const has = (ev) => (j.hooks?.[ev] || []).some((m) => (m.hooks || []).some((h) => h.command === guardCmd));
+  const pre = (j.hooks?.PreToolUse || []).find((m) => (m.hooks || []).some((h) => h.command === guardCmd));
+  const matcherOk = Boolean(pre && ['Write', 'Edit', 'MultiEdit', 'Bash'].every((t) => new RegExp(`(^|\\|)${t}(\\||$)`).test(pre.matcher || '')));
+  return { j, ok: has('PreToolUse') && has('UserPromptSubmit') && matcherOk && existsSync(GUARD) };
+}
+let hs = hookState();
+if (!hs.ok && INSTALL) {
+  const j = hs.j;
+  j.hooks = j.hooks || {};
+  // Drop stale frontend-cook entries (e.g. from an old install path), then add ours.
+  for (const ev of ['PreToolUse', 'UserPromptSubmit']) {
+    j.hooks[ev] = (j.hooks[ev] || []).map((m) => ({ ...m, hooks: (m.hooks || []).filter((h) => !/frontend-cook[\\/]scripts[\\/]guard\.mjs/.test(h.command || '')) })).filter((m) => m.hooks.length);
+  }
+  j.hooks.PreToolUse.push({ matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash', hooks: [{ type: 'command', command: guardCmd }] });
+  j.hooks.UserPromptSubmit.push({ hooks: [{ type: 'command', command: guardCmd }] });
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writeFileSync(settingsPath, JSON.stringify(j, null, 2) + '\n');
+  result.installed.push({ what: 'guard hook', ok: true, command: `added to ${settingsPath}` });
+  result.notes.push('The guard hook was just added to .claude/settings.json. Hooks load at session start: restart Claude Code (or review it in /hooks).');
+  hs = hookState();
+}
+C.guard_hook = { ok: hs.ok, detail: hs.ok ? `guard hook active in .claude/settings.json (${GUARD})` : 'guard hook not installed in this project. Run preflight.mjs --install (it adds PreToolUse and UserPromptSubmit hooks to .claude/settings.json)' };
 
 // Browser for stills, audits and motion recordings
 C.browser = await checkBrowser();

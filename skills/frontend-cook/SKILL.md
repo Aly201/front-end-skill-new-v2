@@ -15,6 +15,7 @@ A frontend design loop that does not accept "looks good" from anyone, including 
 - **After every step:** `node <skill>/scripts/gate.mjs verify <step>`. Exit 0 or the step is not done. Fix what failed and run it again. Never write "done" before this passes.
 - `gate.mjs status` says where the run is and what is next. Run it after every context compaction, then read `cook/BRIEF.md`, `cook/SHOTS.md` and the last two entries of `cook/ROUNDS.md`, and continue. Do not restart work that passed.
 - Steps: `0` setup, `1` references, `2` mockup, `3` bar, `4` time, `5` bans, `6a` static, `6b` motion, `7` feedback, `8` judge.
+- **The guard hook** (installed by setup into `.claude/settings.json`) enforces this even if you forget: it blocks frontend code outside `cook/` until the mockup passed, blocks animation code until the static design passed, blocks hand edits to `GATES.json`, `PREFLIGHT.json`, judge summaries and reports, and logs every tool call to `cook/.ledger.jsonl`. That log is how step 8 proves the judge was a separate session and how step 4's floor counts active time. Do not work around a block (for example by writing files through Bash): it means a step is not done.
 
 ## Do not agree. Verify.
 
@@ -29,7 +30,7 @@ Read `references/pushback.md` once per run. In short:
 
 Requires: nothing. Do: `node <skill>/scripts/preflight.mjs --write` from the project root. If anything fails, run `/frontend-cook-setup` (or `preflight.mjs --install --write`), which installs the **cook** skill and adds the **Inspo** and **Awwwards** MCP servers. New MCP servers load only in a new session: if they were just added, tell the user to restart Claude Code and stop here.
 Then **prove the tools answer**: call one Inspo tool (`get_filters`) and one Awwwards tool (`list_categories`). If either is not in your tool list, stop: setup is not done, whatever the config file says.
-Then `gate.mjs init --project "<name>"` (marks step 0 passed when preflight passed). Read cook's `SKILL.md` (path in `cook/PREFLIGHT.json`): it is the loop engine. Where cook and this skill differ, this skill wins for frontend work (`references/cook-bridge.md`).
+Then `gate.mjs init --project "<name>"` (marks step 0 passed when preflight passed). Preflight also fails without the guard hook; if setup just added it, the session must restart for it to load. Read cook's `SKILL.md` (path in `cook/PREFLIGHT.json`): it is the loop engine. Where cook and this skill differ, this skill wins for frontend work (`references/cook-bridge.md`).
 
 ## Intake (once, before step 1)
 
@@ -61,7 +62,7 @@ Done: `gate.mjs verify 3`.
 
 ## Step 4. Give it time
 
-Requires: step 3. Take as much time as the quality needs. Working is not done. Defaults: landing page **floor 3h**, multi-page site **floor 6h**, one app screen **floor 2h**, one component **cap 1h**. `gate.mjs set-time --floor 3h` and a `Time:` line in BRIEF.md. If the bar is met before the floor, the bar was read too low: look at full-size crops, mobile, the weakest section. Usage pacing: cook's rules.
+Requires: step 3. Take as much time as the quality needs. Working is not done. Defaults: landing page **floor 3h**, multi-page site **floor 6h**, one app screen **floor 2h**, one component **cap 1h**. `gate.mjs set-time --floor 3h` and a `Time:` line in BRIEF.md. The floor counts **active** time from the guard log (gaps over 15 minutes, like waiting for the user, do not count), and floor runs need 3+ judged rounds. If the bar is met before the floor, the bar was read too low: look at full-size crops, mobile, the weakest section. Usage pacing: cook's rules.
 Done: `gate.mjs verify 4`.
 
 ## Step 5. Ban the slop
@@ -73,7 +74,7 @@ Done: `gate.mjs verify 5`.
 
 **6a Static.** Requires: step 5. Build the real thing, every section, every breakpoint, no animation yet. `gate.mjs set-build --src <dir> --url <dev url or file>`. Then run rounds (below) until the static bar is met, send the stills, wait for the user's words, `gate.mjs approve static --quote "..."`. While waiting, keep refining static; do not start motion. Done: `gate.mjs verify 6a`.
 
-**6b Motion.** Requires: 6a. Read `references/motion.md`. Record the motion references (`shoot.mjs <ref url> --out cook/refs --name V01 --live --video 12`), analyze them frame by frame into `cook/MOTION.md`, then add motion in rounds. If the user wants no motion: `gate.mjs set-motion --none --quote "..."`. Done: `gate.mjs verify 6b`.
+**6b Motion.** Requires: 6a. Read `references/motion.md`. Motion comes from references, never from defaults. The user may hand over sites or videos; take the motion out of them **with any tool or skill that works**: `shoot.mjs --live --video` recordings, ffmpeg frame-by-frame, Awwwards `get_motion_dna` / `analyze_scroll_map` / `analyze_hover_census`, or any other installed skill or tool. Save what each tool produced as `cook/refs/motion/<R or V id>-<what>.<ext>`; user videos go in `cook/refs/` as `V01.mp4`. Then `cook/MOTION.md`: 5+ effects, each citing its reference id, each with a measured duration and easing, from 2+ references. If the user wants no motion: `gate.mjs set-motion --none --quote "..."`. Done: `gate.mjs verify 6b`.
 
 ## The round (used in 6a, 6b and after feedback)
 
@@ -88,11 +89,11 @@ Done: `gate.mjs verify 5`.
 
 ## Step 7. Specific feedback
 
-Requires: 6b. Read `references/feedback.md`. Every user remark becomes an inbox line in ROUNDS.md with the section id from SECTIONS.md, the exact change, and `open`. It closes only as `done, proof: <still path>`. Vague remarks ("something feels off") get a plain description of how that part was built, so the user can point at it. Done: `gate.mjs verify 7` (no open items, every proof exists, SECTIONS.md current).
+Requires: 6b. Read `references/feedback.md`. Every user remark becomes an inbox line in ROUNDS.md with the section id from SECTIONS.md (S1, S2...: the gate refuses lines without one), the exact change, and `open`. If the user saw the stills and wants no changes, record it: `gate.mjs no-feedback --quote "<their words>"`; zero feedback without that does not pass. It closes only as `done, proof: <still path>`. Vague remarks ("something feels off") get a plain description of how that part was built, so the user can point at it. Done: `gate.mjs verify 7` (no open items, every proof exists, SECTIONS.md current).
 
 ## Step 8. Separate judge
 
-Requires: 7. The final score comes from judges who did not build it: fresh subagents with zero context, and at least one on a different model or in a separate session (`/frontend-cook-judge`). They see only the side-by-sides, the stills and the rubric. Target: the bar from step 3 after calibration. Then the user approves the final stills: `gate.mjs approve final --quote "..."`.
+Requires: 7. The final score comes from judges who did not build it: fresh subagents with zero context, **plus at least one judge in a separate Claude Code session** (`/frontend-cook-judge <round>`). The gate checks the guard log: a judge file must have been written by a session that never edited the build. A judge's own claim to be separate does not count. They see only the side-by-sides, the stills and the rubric. Target: the bar from step 3 after calibration. Then the user approves the final stills: `gate.mjs approve final --quote "..."`.
 Done: `gate.mjs verify 8`. Then ship: final build check, and a report with the scores, every override with the user's words, and anything still below the bar.
 
 ## Never

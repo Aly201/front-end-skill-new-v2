@@ -159,3 +159,25 @@ export function homeDir() { return homedir(); }
 export function isMain(metaUrl) {
   try { return Boolean(process.argv[1]) && pathToFileURL(realpathSync(process.argv[1])).href === metaUrl; } catch { return false; }
 }
+
+// Animation code. Banned in the mockup and the static build (step 6a), allowed from step 6b.
+// Hover and focus transitions are allowed in static: they are states, not animation.
+export const MOTION_CODE = /@keyframes|\banimation(?:-name)?\s*:|\bgsap\b|framer-motion|['"]motion\/react['"]|\bfrom\s+['"]motion['"]|\banimate-(?!none\b)[a-z]|\blenis\b|ScrollTrigger|useSpring|\.animate\(\s*[\[{]|\bview-timeline|\bscroll-timeline|animation-timeline/;
+export const FRONTEND_EXT = ['.html', '.htm', '.css', '.scss', '.sass', '.less', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.mdx'];
+
+// The activity ledger the guard hook writes: one JSON object per line.
+export function readLedger(root) {
+  try {
+    return readFileSync(join(root, STATE_DIR, '.ledger.jsonl'), 'utf8').split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch { return []; }
+}
+
+// Hours of real activity: gaps between tool calls of up to `gapMin` minutes count, longer gaps
+// (waiting for the user, idle sessions) do not.
+export function activeHours(events, gapMin = 15) {
+  const t = events.map((e) => Date.parse(e.at)).filter(Number.isFinite).sort((a, b) => a - b);
+  let ms = 0;
+  for (let i = 1; i < t.length; i++) { const d = t[i] - t[i - 1]; if (d <= gapMin * 60000) ms += d; }
+  return ms / 3600000;
+}

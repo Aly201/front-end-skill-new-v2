@@ -10,14 +10,18 @@ It is built on top of [cook](https://github.com/Leonxlnx/cook) (the build, compa
 |---|---|---|
 | 0 | Setup | cook is installed, the Inspo and Awwwards MCPs are configured, Node 18+, ffmpeg and a headless browser work. Cannot be overridden. |
 | 1 | Strong references | 9 to 12 references, each a real capture 1200px+ wide, from 3+ different sites, sourced from both Inspo and Awwwards for what you did not supply, every one with a source and a "take from it" note. The brief stays under 40 lines. |
-| 2 | Target mockup | A single-file mockup exists, its desktop and mobile stills are newer than its code, it is shown side by side with the references, it passes the slop scan, 2+ fresh judges scored its feel, and **you** approved it in your own words. |
+| 2 | Target mockup | The hook blocks build code until this passes. A single-file, animation-free mockup exists, its desktop and mobile stills are newer than its code, it is shown side by side with the references, it passes the slop scan, 2+ fresh judges scored its feel, and **you** approved it in your own words. |
 | 3 | Bar as a number | Overall 9.2/10 and every dimension 8.5+ (by default). A bar under 9.0 needs your own words. |
-| 4 | Time | A floor (landing page 3h by default) or a cap is set and the clock started. Finishing before the floor fails step 8. |
+| 4 | Time | A floor (landing page 3h by default) or a cap is set. The floor counts **active** time from the hook's log (idle gaps over 15 minutes do not count) and needs 3+ judged rounds; finishing early fails step 8. |
 | 5 | Ban the slop | The ban file exists; a ban is switched off only with your own words. |
-| 6a | Static build | Latest stills, slop scan, browser audit and judge scores are all newer than the latest code change, the calibrated score meets the bar, and you approved the static design. |
-| 6b | Motion | Motion is analyzed frame by frame from reference videos (5+ effects with timings), recorded, and judged; or you said "no motion" in your own words. |
-| 7 | Specific feedback | No open feedback item; every closed one points to a screenshot that exists; the build is described section by section. |
-| 8 | Separate judge | 2+ fresh judges, at least one on a different model or in a separate session, agree within 1.0 and meet the bar after calibration; the time floor is reached; you approved the final stills. |
+| 6a | Static build | No animation code in the build (the hook blocks it while writing, the gate scans for it). Latest stills, slop scan, browser audit and judge scores are all newer than the latest code change, the calibrated score meets the bar, and you approved the static design. |
+| 6b | Motion | You give references (sites or videos) and it extracts the motion with any tool or skill (recordings, ffmpeg frames, Awwwards motion analysis, ...), saving the output. 5+ effects from 2+ references, each with a measured duration and easing and saved evidence; recorded and judged. Or you said "no motion" in your own words. |
+| 7 | Specific feedback | Every feedback item names a section (S1, S2...) from the section-by-section description, none is open, every closed one points to a screenshot that exists. No feedback at all needs your words. |
+| 8 | Separate judge | 2+ fresh judges agree within 1.0 and meet the bar after calibration, and the hook's log proves at least one judge file was written by a separate session that never touched the build. The time floor is reached and you approved the final stills. |
+
+## How it is enforced
+
+Two layers. `gate.mjs` checks every step before it starts and before it counts as done. A **guard hook** (added to your project's `.claude/settings.json` by setup) makes Claude Code itself refuse: build code before the mockup, animation code before the static design is approved, and hand edits to the files only the scripts write. It also logs every action, which is how the separate judge and the active time are proven. Both behaviours were tested in a live Claude Code session.
 
 ## Why it does not agree with you
 
@@ -39,7 +43,7 @@ It is built on top of [cook](https://github.com/Leonxlnx/cook) (the build, compa
 - Node.js 18+
 - ffmpeg
 - Playwright with Chromium (`npm i -D playwright && npx playwright install chromium`), or a Chromium the scripts can find
-- Installed by `/frontend-cook-setup` if missing: the cook skill, the Inspo MCP, the Awwwards MCP
+- Installed by `/frontend-cook-setup` if missing: the cook skill, the Inspo MCP, the Awwwards MCP, the guard hook
 
 ## Install
 
@@ -60,7 +64,9 @@ Then in Claude Code, inside your project:
 - Judges are language models. They are calibrated by your estimates and checked by scripts, but a 9.2 is still a judgment, not a measurement.
 - The slop scanner works on source code with patterns; it can miss a banned look built in an unusual way, and it can flag an allowed use. That is why visual bans are also on the judges' list and why a ban can be switched off with your words.
 - Contrast is measured only on text over solid colors; text over images and gradients is reported as "not measured" for the judges to look at.
-- New MCP servers load only after a session restart.
+- New MCP servers and hooks load only after a session restart.
+- The hook sees Claude Code's own tools. Code written by a program Claude runs (for example a Python script that writes files) gets past the hook. The gate still scans the build for animation code and rejects stale proof, so it cannot pass a step that way, but it can write the code.
+- A subagent judge's "fresh context" cannot be proven; that is why step 8 requires a judge from a separate session, which can be proven.
 - The Awwwards MCP index is a local cache that fills over time; early searches can be thin. Inspo fills the gap.
 
 ## License

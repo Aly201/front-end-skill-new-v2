@@ -16,7 +16,7 @@ Weak spot: on mobile the photo goes below the button and the first screen is tex
 ...
 ```
 
-Section ids (S1, S2...) are what feedback refers to. The gate checks that SECTIONS.md is newer than the latest source change.
+Section ids (S1, S2...) are what feedback refers to. The gate checks that SECTIONS.md is newer than the latest source change, and that every inbox line names a section that exists in it.
 
 ## Turn every remark into an inbox line
 
@@ -29,6 +29,7 @@ In `cook/ROUNDS.md` under "User feedback inbox", with the user's exact words and
 
 - Close an item only as `done, proof: <path>` to a still taken after the fix. The gate checks the file exists.
 - User feedback comes before judge gaps in the next round's focus.
+- No feedback at all does not pass. Send the stills and SECTIONS.md and ask. If the user says they want no changes, record their words: `gate.mjs no-feedback --quote "..."`.
 
 ## When the user cannot say what is wrong
 
