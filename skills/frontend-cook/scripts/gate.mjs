@@ -12,19 +12,21 @@
 //   override <step> --quote "<user's exact words>" --reason "<why>"   user takes responsibility, logged
 //   reopen <step>                         set this step and every later one back to pending
 //   set-bar --judge 9.2 --floor 8.5 --similarity 99 [--mockup 8] [--quote "..."]
-//   set-time (--floor 3h | --cap 1.5h)
+//                                         --quote: any bar below 9.0 / 8.5 / 8, or any lowering
+//   set-time (--floor 3h | --cap 1.5h) [--quote "..."]
+//                                         --quote: a cap, a floor under 2h, or a lower floor
 //   set-build --src <dir> --url <url or file>
 //   set-motion (--none --quote "..." | --refs)
 //   no-feedback --quote "..."           the user saw the stills and wants no changes (step 7)
 //   score <round>                         median of the judge files in cook/judge/<round>/, calibrated
-//   calibrate --user <score 0-10>         the user's estimate; only ever lowers scores
+//   calibrate --user <score 0-10> --quote "<user's words with that number>"
 //   elapsed                               hours since the timer started
 //
 // Steps: 0 setup, 1 references, 2 mockup, 3 bar, 4 time, 5 bans, 6a static build,
 //        6b motion, 7 feedback, 8 separate judge.
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { join, resolve, extname } from 'node:path';
-import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, MOTION_CODE, FRONTEND_EXT, readLedger, activeHours } from './_common.mjs';
+import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, MOTION_CODE, FRONTEND_EXT, readLedger, activeHours, userSaid } from './_common.mjs';
 
 export const STEPS = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 export const STEP_NAMES = {
@@ -58,6 +60,18 @@ function fail(msg) { console.error(`gate: ${msg}`); process.exit(2); }
 const argv = process.argv.slice(2);
 const opt = (k, d = null) => { const i = argv.indexOf(k); return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : d; };
 const quoteOk = (q) => typeof q === 'string' && q.trim().length >= 8;
+const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// True when the number appears as a number of its own (not inside 99% or 9.25).
+const numberIn = (text, n) => new RegExp(`(^|[^\\d.])${escapeRe(n)}(?![\\d.])`).test(text || '');
+const roundRank = (r) => (r === 'mockup' ? -1 : Number(String(r).replace(/^r/i, '')));
+
+// The user's exact words: 8+ characters that the user typed in this project. The guard hook
+// logs the user's prompts to the ledger; the words must appear there.
+function needUserWords(q) {
+  if (!quoteOk(q)) fail('this needs the user\'s exact words in --quote (8+ characters). Never write them yourself.');
+  if (!readLedger(root).some((e) => e.tool === 'UserPrompt')) fail('guard hook is not logging prompts: run /frontend-cook-setup and restart');
+  if (!userSaid(root, q)) fail('these words are not in any message the user typed in this project. Paste their exact words; never write them yourself.');
+}
 
 // ---------------- proof helpers ----------------
 function brief() { try { return readFileSync(S('BRIEF.md'), 'utf8'); } catch { return ''; } }
@@ -74,6 +88,12 @@ function rounds() {
 export function latestRound() { const r = rounds(); return r.length ? r[r.length - 1] : null; }
 function report(name) { return readJson(S('reports', name)); }
 function hoursElapsed(g) { return g.time?.started ? (Date.now() - Date.parse(g.time.started)) / 3600000 : 0; }
+// The stills a person approves: the mockup's, or the latest round's.
+function stillsFor(kind) {
+  if (kind === 'mockup') return S('stills', 'mockup');
+  const r = latestRound();
+  return r ? S('stills', r) : null;
+}
 
 function refIds() {
   const ids = new Map();
@@ -109,23 +129,77 @@ const C = {
   },
   approval: (g, k) => {
     const a = g.approvals?.[k];
-    return [Boolean(a && quoteOk(a.quote)), a ? `user approved ${k}: "${a.quote}"` : `user has not approved the ${k} yet (needs their words in chat, then: gate.mjs approve ${k} --quote "...")`];
+    if (!a || !quoteOk(a.quote)) return [false, `user has not approved the ${k} yet (needs their words in chat, then: gate.mjs approve ${k} --quote "...")`];
+    if (a.shown === undefined) return [false, `the ${k} approval has no record of the stills it saw: show the stills and approve again`];
+    const dir = stillsFor(k);
+    const newest = dir ? newestMtime(images(dir)) : 0;
+    if (newest > a.shown) return [false, 'stills changed after the approval: show the new ones and ask again'];
+    return [true, `user approved ${k}: "${a.quote}"`];
   },
 };
 
 function summaryFor(round) { return readJson(S('judge', round, 'summary.json')); }
+function judgeFilesIn(round) {
+  try { return readdirSync(S('judge', round)).filter((f) => f.endsWith('.json') && f !== 'summary.json'); } catch { return []; }
+}
+// The ledger entry that wrote a judge file (the first one: a judge file is written once).
+function judgeWriter(ledger, round, file) {
+  const rel = `cook/judge/${round}/${file}`;
+  return ledger.find((e) => e.file === rel) || null;
+}
+
+// Sessions that edited the build, the mockup or the project: the builders. A judge session
+// reads only the judge files and writes only its own judge file.
+function builderSessions(ledger) {
+  const ids = new Set();
+  for (const e of ledger) {
+    if (!e.session_id || e.tool === 'UserPrompt') continue;
+    if (e.tool === 'Bash') {
+      if (/(gate|shoot|audit|slop_scan|side-by-side)\.mjs/.test(e.cmd || '')) ids.add(e.session_id);
+      continue;
+    }
+    if (!(e.file || '').startsWith('cook/judge/')) ids.add(e.session_id);
+  }
+  return ids;
+}
+
+// Every judge file must come through the guard hook, and the builder never judges itself.
+function judgeProvenance(round) {
+  const ledger = readLedger(root);
+  if (!ledger.length) return [[false, 'no ledger: the guard hook is not installed (run /frontend-cook-setup)']];
+  const files = judgeFilesIn(round);
+  const builders = builderSessions(ledger);
+  const hasAgents = ledger.some((e) => e.agent != null);
+  const unlogged = [], selfWritten = [];
+  for (const f of files) {
+    const w = judgeWriter(ledger, round, f);
+    if (!w) { unlogged.push(f); continue; }
+    if (hasAgents && w.agent == null && builders.has(w.session_id)) selfWritten.push(f);
+  }
+  return [
+    [files.length > 0 && unlogged.length === 0, unlogged.length ? `no ledger Write entry for ${unlogged.join(', ')}: a judge writes its own judge file through the guard hook` : (files.length ? 'every judge file was written through the guard hook' : `no judge files in ${round}`)],
+    [selfWritten.length === 0, selfWritten.length ? `${selfWritten.join(', ')} written by the builder itself, not by a judge` : 'no judge file was written by the builder itself'],
+  ];
+}
 
 function judgeChecks(g, round, stage, than) {
   const out = [];
+  out.push(...judgeProvenance(round));
   const s = summaryFor(round);
   if (!s) { out.push([false, `no judge summary for ${round}: have 2+ fresh judges write cook/judge/${round}/*.json, then run gate.mjs score ${round}`]); return out; }
   const p = S('judge', round, 'summary.json');
   out.push([mtime(p) >= than, mtime(p) >= than ? `judge summary ${round} is current` : `judge summary ${round} is older than the latest source change: judge the current build`]);
   // Summary must be newer than every judge file in the folder.
-  const jfiles = readdirSync(S('judge', round)).filter((f) => f.endsWith('.json') && f !== 'summary.json').map((f) => S('judge', round, f));
-  out.push([mtime(p) >= newestMtime(jfiles), mtime(p) >= newestMtime(jfiles) ? 'summary includes every judge file' : `a judge file changed after scoring: run gate.mjs score ${round}`]);
+  const jpaths = judgeFilesIn(round).map((f) => S('judge', round, f));
+  out.push([mtime(p) >= newestMtime(jpaths), mtime(p) >= newestMtime(jpaths) ? 'summary includes every judge file' : `a judge file changed after scoring: run gate.mjs score ${round}`]);
+  // Every judge file must be at least as new as the build it judged.
+  const stale = jpaths.filter((f) => mtime(f) < than).map((f) => f.split('/').pop());
+  out.push([stale.length === 0, stale.length ? `${stale.join(', ')} is older than the latest source change: judge the current build in a new round` : 'every judge file is newer than the latest source change']);
   out.push([s.judges >= 2, `${s.judges} fresh judge(s) (need 2+)`]);
-  out.push([s.spread_ok, s.spread_ok ? `judges agree within 1.0 (spread ${s.spread_overall})` : `judges disagree by ${s.spread_overall}: add another fresh judge, then score again`]);
+  const spreadMsg = s.spread_ok ? `judges agree within 1.0 (spread ${s.spread_overall})`
+    : (s.judges >= 3 ? `the lowest judge (${s.lowest_overall}) is more than 1.0 under the median (${s.raw.overall}): fix what it named`
+      : `judges disagree by ${s.spread_overall}: add another fresh judge, then score again`);
+  out.push([s.spread_ok, spreadMsg]);
   if (stage === 'mockup') {
     out.push([s.calibrated.overall >= g.target.mockup, `mockup feel ${s.calibrated.overall}/10 calibrated (needs ${g.target.mockup})`]);
     return out;
@@ -207,22 +281,32 @@ function doneChecks(g, step) {
       break;
     }
     case '3': {
-      out.push([Boolean(g.target?.judge), `bar set: judge ${g.target?.judge}/10, floor ${g.target?.floor}, similarity stretch ${g.target?.similarity}%`]);
-      out.push([g.target.judge >= 9 || quoteOk(g.target.lowered_by_user), g.target.judge >= 9 ? 'bar is 9.0 or higher' : `bar lowered below 9.0 by the user: "${g.target.lowered_by_user || ''}"`]);
+      const t = g.target || {};
+      out.push([Boolean(t.judge), `bar set: judge ${t.judge}/10, floor ${t.floor}, similarity stretch ${t.similarity}%`]);
+      const weak = t.judge < 9 || t.floor < 8.5 || t.mockup < 8 || t.similarity < 99;
+      out.push([!weak || quoteOk(t.lowered_by_user), !weak ? 'bar is at or above the defaults (9.0 overall, 8.5 floor, 8 mockup, 99% similarity)'
+        : (quoteOk(t.lowered_by_user) ? `bar lowered below the defaults by the user: "${t.lowered_by_user}"` : 'bar is below the defaults without the user\'s words: gate.mjs set-bar ... --quote "..."')]);
       const bar = briefLine('Bar');
-      out.push([Boolean(bar && bar.includes(String(g.target.judge))), bar ? `BRIEF.md Bar: ${bar}` : 'BRIEF.md has no "Bar:" line with the same number']);
+      const barOk = Boolean(bar) && numberIn(bar, t.judge) && numberIn(bar, t.floor);
+      out.push([barOk, !bar ? `BRIEF.md has no "Bar:" line` : barOk ? `BRIEF.md Bar: ${bar}` : `BRIEF.md Bar line must show ${t.judge} and ${t.floor} as numbers (a bare "99%" is not "9"): ${bar}`]);
       break;
     }
     case '4': {
-      out.push([Boolean(g.time?.started && g.time?.mode), g.time?.mode ? `time: ${g.time.mode} ${g.time.hours}h, started ${g.time.started}` : 'time not set (gate.mjs set-time --floor 3h)']);
+      const t = g.time || {};
+      out.push([Boolean(t.started && t.mode), t.mode ? `time: ${t.mode} ${t.hours}h, started ${t.started}` : 'time not set (gate.mjs set-time --floor 3h)']);
+      if (t.mode) {
+        const needWords = t.mode === 'cap' || t.hours < 2;
+        out.push([!needWords || quoteOk(t.quote), !needWords ? `time floor ${t.hours}h`
+          : (quoteOk(t.quote) ? `${t.mode} ${t.hours}h, the user's words: "${t.quote}"` : `a ${t.mode} of ${t.hours}h needs the user's words (gate.mjs set-time ... --quote "...")`)]);
+      }
       out.push([briefLine('Time') !== null, 'BRIEF.md has a "Time:" line']);
       break;
     }
     case '5': {
       out.push(C.file(S('bans.json'), 'bans file'));
       const b = readJson(S('bans.json'), {});
-      const bad = (b.allowed || []).filter((a) => !quoteOk(a.quote));
-      out.push([bad.length === 0, bad.length ? `bans switched off without the user's words: ${bad.map((a) => a.id).join(', ')}` : 'every switched-off ban has the user\'s words']);
+      const bad = (b.allowed || []).filter((a) => !quoteOk(a.quote) || !userSaid(root, a.quote));
+      out.push([bad.length === 0, bad.length ? `bans switched off without the user's own words (typed in this project): ${bad.map((a) => a.id).join(', ')}` : 'every switched-off ban has the user\'s words']);
       out.push([briefLine('Bans') !== null, 'BRIEF.md has a "Bans:" line']);
       break;
     }
@@ -305,18 +389,23 @@ function doneChecks(g, step) {
       out.push(...roundEvidence(g, r, newest, g.motion !== 'none'));
       out.push(...judgeChecks(g, r, 'final', newest));
       // Separate judge, proven by the guard hook's ledger: a judge file in this round written
-      // by a session that never edited the build or the mockup.
+      // by a session that never edited the build, the mockup or the project.
       const ledger = readLedger(root);
-      const builders = builderSessions();
-      const judgeWrites = ledger.filter((e) => e.file && e.file.startsWith(`cook/judge/${r}/`) && !e.file.endsWith('summary.json'));
-      const separate = [...new Set(judgeWrites.filter((e) => e.session_id && !builders.has(e.session_id)).map((e) => e.file))];
+      const builders = builderSessions(ledger);
+      const separate = judgeFilesIn(r).filter((f) => {
+        const w = judgeWriter(ledger, r, f);
+        return Boolean(w && w.session_id && !builders.has(w.session_id));
+      });
       out.push([ledger.length > 0, ledger.length ? 'guard hook ledger present' : 'no ledger: the guard hook is not installed (run /frontend-cook-setup)']);
       out.push([separate.length > 0, separate.length ? `separate-session judge verified: ${separate.join(', ')}` : `no judge file in ${r} was written from a separate session (one that never edited the build). Open a new Claude Code session here and run /frontend-cook-judge ${r}`]);
+      const sepMed = median(separate.map((f) => readJson(S('judge', r, f))?.overall));
+      const sepCal = sepMed === null ? null : Math.round((sepMed + g.calibration.offset) * 100) / 100;
+      out.push([sepCal !== null && sepCal >= g.target.judge, sepCal === null ? 'no separate judge score to check' : `the separate judge scored ${sepCal} calibrated: it must meet the bar on its own (bar ${g.target.judge})`]);
       if (g.time?.mode === 'floor') {
-        const act = activeHours(ledger.filter((e) => builders.has(e.session_id) || (e.file || '').startsWith('cook/')));
+        const act = activeHours(ledger.filter((e) => e.tool !== 'UserPrompt' && (builders.has(e.session_id) || (e.file || '').startsWith('cook/'))));
         out.push([act >= g.time.hours, `${act.toFixed(1)}h of active work logged (floor ${g.time.hours}h; idle gaps over 15 min do not count). Done before the floor means the bar was read too low`]);
-        const n = rounds().length;
-        out.push([n >= 3, `${n} judged round(s) (need 3+ before shipping)`]);
+        const n = rounds().filter((x) => (summaryFor(x)?.judges ?? 0) >= 2).length;
+        out.push([n >= 3, `${n} judged round(s) with 2+ judges (need 3+ before shipping)`]);
       }
       out.push(C.approval(g, 'final'));
       break;
@@ -336,16 +425,6 @@ function motionCodeIn(files) {
     if (i >= 0) hits.push(`${f.replace(root + '/', '')}:${i + 1}`);
   }
   return hits;
-}
-
-// Sessions that edited the build or the mockup: the builders.
-function builderSessions() {
-  const ids = new Set();
-  for (const e of readLedger(root)) {
-    if (!e.session_id || !e.file || e.tool === 'Bash') continue;
-    if (!e.file.startsWith('cook/') || e.file.startsWith('cook/mockup/')) ids.add(e.session_id);
-  }
-  return ids;
 }
 
 function roundEvidence(g, r, newest, needVideo) {
@@ -398,11 +477,14 @@ export function scoreRound(dir, offset = 0) {
   const raw = { overall: r1(median(overalls)), dims, similarity: r1(median(judges.map((j) => j.similarity))) };
   const cal = { overall: raw.overall === null ? null : r1(raw.overall + offset), dims: Object.fromEntries(Object.entries(dims).map(([k, v]) => [k, r1(v + offset)])) };
   const spread = overalls.length ? r1(Math.max(...overalls) - Math.min(...overalls)) : null;
+  const lowest = overalls.length ? Math.min(...overalls) : null;
+  // Two judges: they must agree within 1.0. Three or more: the lowest judge may be at most 1.0 under the median.
+  const spreadOk = judges.length === 2 ? spread <= 1.0 : (judges.length >= 3 && raw.overall - lowest <= 1.0);
   const models = new Set(judges.map((j) => `${j.model || 'unknown'}|${j.session || 'subagent'}`));
   const gaps = judges.flatMap((j) => (j.gaps || []).map((x) => ({ judge: j.judge || j.file, ...x })));
   return {
     judges: judges.length, problems, raw, offset, calibrated: cal,
-    spread_overall: spread, spread_ok: judges.length >= 3 || (spread !== null && spread <= 1.0),
+    spread_overall: spread, lowest_overall: lowest, spread_ok: spreadOk,
     different_model: judges.some((j) => j.different_model === true || j.session === 'separate'),
     models: [...models], weakest: Object.entries(cal.dims).sort((a, b) => a[1] - b[1])[0] || null,
     slop_seen: [...new Set(judges.flatMap((j) => j.slop_seen || []))],
@@ -468,8 +550,12 @@ if (isMainRun) {
       const g = load();
       if (!['mockup', 'static', 'final'].includes(a1)) fail('approve mockup|static|final --quote "<user words>"');
       const q = opt('--quote');
-      if (!quoteOk(q)) fail('an approval needs the user\'s exact words in --quote (8+ characters). Never approve on the user\'s behalf.');
-      g.approvals[a1] = { quote: q, at: new Date().toISOString() };
+      needUserWords(q);
+      // The approval is tied to the stills the user saw: a newer still makes it stale.
+      const dir = stillsFor(a1);
+      const imgs = dir ? images(dir) : [];
+      if (!imgs.length) fail(`no stills to approve yet for ${a1}: show the user the stills first (${a1 === 'mockup' ? 'cook/stills/mockup' : 'cook/stills/<round>'})`);
+      g.approvals[a1] = { quote: q, at: new Date().toISOString(), shown: newestMtime(imgs) };
       save(g);
       console.log(`recorded ${a1} approval: "${q}"`);
       break;
@@ -478,7 +564,8 @@ if (isMainRun) {
       const g = load();
       if (!STEPS.includes(a1) || a1 === '0') fail('override <step 1-8> --quote "<user words>" --reason "<why>" (setup cannot be overridden: the other skills are required)');
       const q = opt('--quote'), reason = opt('--reason');
-      if (!quoteOk(q) || !reason) fail('an override needs the user\'s exact words (--quote) and a --reason');
+      if (!reason) fail('an override needs a --reason');
+      needUserWords(q);
       g.overrides[a1] = { quote: q, reason, at: new Date().toISOString(), unmet: doneChecks(g, a1).filter(([ok]) => !ok).map(([, m]) => m) };
       g.steps[a1] = { status: 'overridden', at: new Date().toISOString() };
       save(g);
@@ -498,14 +585,23 @@ if (isMainRun) {
     }
     case 'set-bar': {
       const g = load();
-      const judge = Number(opt('--judge', g.target.judge));
-      const floor = Number(opt('--floor', g.target.floor));
-      const sim = Number(opt('--similarity', g.target.similarity));
-      const mock = Number(opt('--mockup', g.target.mockup));
+      const t = g.target;
+      const judge = Number(opt('--judge', t.judge));
+      const floor = Number(opt('--floor', t.floor));
+      const sim = Number(opt('--similarity', t.similarity));
+      const mock = Number(opt('--mockup', t.mockup));
       if (![judge, floor, sim, mock].every(Number.isFinite)) fail('numbers only');
-      if (judge < 9 && !quoteOk(opt('--quote'))) fail(`a bar below 9.0 makes average work pass. Only with the user's words: --quote "..."`);
+      if (floor < 0) fail('the floor cannot be below 0');
+      if (judge > 10) fail('the bar cannot be above 10');
       if (floor > judge) fail('floor cannot be above the bar');
-      g.target = { judge, floor, similarity: sim, mockup: mock, ...(judge < 9 ? { lowered_by_user: opt('--quote') } : {}) };
+      const lowering = judge < t.judge || floor < t.floor || sim < t.similarity || mock < t.mockup;
+      const needQuote = lowering || judge < 9 || floor < 8.5 || mock < 8;
+      const q = opt('--quote');
+      if (needQuote) {
+        if (!quoteOk(q)) fail('a bar below 9.0 (or 8.5 floor, 8 mockup), or any lowering, needs the user\'s words: --quote "..."');
+        needUserWords(q);
+      }
+      g.target = { judge, floor, similarity: sim, mockup: mock, ...(needQuote ? { lowered_by_user: q } : t.lowered_by_user ? { lowered_by_user: t.lowered_by_user } : {}) };
       save(g);
       console.log(`bar: overall ${judge}/10, every dimension ${floor}+, similarity stretch ${sim}%, mockup feel ${mock}/10`);
       break;
@@ -515,7 +611,16 @@ if (isMainRun) {
       const parseH = (v) => { const m = /^(\d+(?:\.\d+)?)\s*(h|m)?$/i.exec(v || ''); return m ? (m[2]?.toLowerCase() === 'm' ? +m[1] / 60 : +m[1]) : null; };
       const floor = parseH(opt('--floor')), cap = parseH(opt('--cap'));
       if ((floor === null) === (cap === null)) fail('set-time needs exactly one of --floor <hours> or --cap <hours>');
-      g.time = { mode: floor !== null ? 'floor' : 'cap', hours: floor ?? cap, started: g.time?.started || new Date().toISOString() };
+      const hours = floor ?? cap;
+      if (!(hours > 0)) fail('set-time hours must be more than 0');
+      const lowersFloor = floor !== null && g.time?.mode === 'floor' && floor < g.time.hours;
+      const needQuote = cap !== null || (floor !== null && floor < 2) || lowersFloor;
+      const q = opt('--quote');
+      if (needQuote) {
+        if (!quoteOk(q)) fail('a cap, a floor under 2 hours, or a lower floor needs the user\'s words: --quote "..."');
+        needUserWords(q);
+      }
+      g.time = { mode: floor !== null ? 'floor' : 'cap', hours, started: g.time?.started || new Date().toISOString(), ...(needQuote ? { quote: q } : {}) };
       save(g);
       console.log(`time: ${g.time.mode} ${g.time.hours}h, started ${g.time.started}`);
       break;
@@ -532,16 +637,18 @@ if (isMainRun) {
     case 'set-motion': {
       const g = load();
       if (argv.includes('--none')) {
-        if (!quoteOk(opt('--quote'))) fail('no motion only with the user\'s words: --none --quote "..."');
-        g.motion = 'none'; g.motion_quote = opt('--quote');
+        const q = opt('--quote');
+        needUserWords(q);
+        g.motion = 'none'; g.motion_quote = q;
       } else g.motion = 'refs';
       save(g); console.log(`motion: ${g.motion}`);
       break;
     }
     case 'no-feedback': {
       const g = load();
-      if (!quoteOk(opt('--quote'))) fail('no-feedback needs the user\'s words: --quote "..."');
-      g.no_feedback_quote = opt('--quote'); save(g);
+      const q = opt('--quote');
+      needUserWords(q);
+      g.no_feedback_quote = q; save(g);
       console.log(`recorded: user wants no changes: "${g.no_feedback_quote}"`);
       break;
     }
@@ -564,22 +671,33 @@ if (isMainRun) {
     }
     case 'calibrate': {
       const g = load();
-      const user = Number(opt('--user'));
-      if (!Number.isFinite(user) || user < 0 || user > 10) fail('calibrate --user <0-10>');
+      const raw = opt('--user');
+      const user = Number(raw);
+      if (raw === null || !Number.isFinite(user) || user < 0 || user > 10) fail('calibrate --user <0-10> --quote "<user words with that number>"');
+      const q = opt('--quote');
+      needUserWords(q);
+      if (!numberIn(q, raw)) fail(`the user's words must contain their number (${raw}), e.g. "I rate it ${raw} out of 10"`);
       const r = opt('--round') || latestRound() || (existsSync(S('judge', 'mockup', 'summary.json')) ? 'mockup' : null);
       const s = r && summaryFor(r);
-      if (!s) fail('no scored round to calibrate against');
-      const gap = Math.round((user - s.raw.overall) * 100) / 100;
-      if (gap < g.calibration.offset) {
-        g.calibration.offset = gap;
-        g.calibration.history.push({ at: new Date().toISOString(), round: r, user, judges: s.raw.overall, offset: gap });
+      if (s?.raw?.overall === null || s?.raw?.overall === undefined) fail('no scored round to calibrate against: run gate.mjs score <round> first');
+      // The offset never raises a score above the judges: it is 0 or lower.
+      const next = Math.round(Math.min(0, user - s.raw.overall) * 100) / 100;
+      const cur = g.calibration.offset;
+      const last = g.calibration.history.at(-1)?.round;
+      const newer = last !== undefined && roundRank(r) > roundRank(last);
+      if (next < cur || (newer && next !== cur)) {
+        g.calibration.offset = next;
+        g.calibration.history.push({ at: new Date().toISOString(), round: r, user, judges: s.raw.overall, offset: next, quote: q });
         save(g);
-        console.log(`calibration offset now ${gap}: every later score is lowered by ${-gap}. Rescore open rounds with gate.mjs score <round>.`);
-      } else if (gap > 0) {
-        g.calibration.history.push({ at: new Date().toISOString(), round: r, user, judges: s.raw.overall, offset: g.calibration.offset, note: 'user higher than judges: not applied' });
+        console.log(`calibration offset now ${next}${newer && next >= cur ? ` (re-based on ${r})` : ''}: every score is lowered by ${-next} from now on. Rescore open rounds with gate.mjs score <round>.`);
+      } else if (next === cur) {
+        console.log(`offset stays ${cur}`);
+      } else {
+        g.calibration.history.push({ at: new Date().toISOString(), round: r, user, judges: s.raw.overall, offset: cur, note: 'user higher than judges: not applied' });
         save(g);
-        console.log(`Not applied. You rate it ${user}, the judges ${s.raw.overall}. Scores are never raised to match a kinder estimate: the gaps the judges named still stand. Offset stays ${g.calibration.offset}.`);
-      } else console.log(`offset stays ${g.calibration.offset}`);
+        console.log(`Not applied. You rate it ${user}, the judges ${s.raw.overall}. Scores are never raised to match a kinder estimate: the gaps the judges named still stand. Offset stays ${cur}.`);
+      }
+      if (10 + g.calibration.offset < g.target.judge) console.log(`WARNING: with this offset the bar cannot be reached; ask the user to rate the next round`);
       break;
     }
     case 'elapsed': { const g = load(); console.log(`${hoursElapsed(g).toFixed(2)}h${g.time ? ` of ${g.time.mode} ${g.time.hours}h` : ' (timer not set)'}`); break; }
