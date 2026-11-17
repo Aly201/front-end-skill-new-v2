@@ -40,7 +40,7 @@ One message, every open question, a default for each, cook-style (`<cook>/refere
 
 ## Step 0b. Baseline (redesign mode only)
 
-Requires: step 0. Read `references/redesign.md`. `node <skill>/scripts/baseline.mjs` captures the site as it is: stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion hits, and each `set-checks` result, into `cook/baseline/`. A dirty tree is refused unless the user agrees (`gate.mjs allow-dirty --quote`). Then write `cook/baseline/KEEP.md` (what must survive, what is dropped, with the user's words) and `cook/baseline/probes.json` (one probe per form and toggle, run against a dev or staging URL, never production). Run `node <skill>/scripts/baseline.mjs --probes-only` after writing the probes: `cook/baseline/probecheck.json` must show that every probe proves something. Show the user the baseline stills, then `gate.mjs approve baseline --quote "<their words>"`. Done: `gate.mjs verify 0b`.
+Requires: step 0. Read `references/redesign.md`. `node <skill>/scripts/baseline.mjs` captures the site as it is: stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion hits, and each `set-checks` result, into `cook/baseline/`. A dirty tree is refused unless the user agrees (`gate.mjs allow-dirty --quote`). Then write `cook/baseline/KEEP.md` (what must survive, what is dropped, with the user's words) and `cook/baseline/probes.json` (one probe per form and toggle, run against a dev or staging URL, never production). Run `node <skill>/scripts/baseline.mjs --probes-only` after writing the probes: `cook/baseline/probecheck.json` must show that every probe proves something. Show the user the baseline stills, then `gate.mjs approve baseline --quote "<their words>"`. Done: `gate.mjs verify 0b`. Baseline takes about 20 s per page: run it with a long timeout or in the background. Once approved, `baseline.mjs` refuses to recapture: reopen 0b (`gate.mjs reopen 0b`) first.
 
 ## Step 1. Strong references
 
@@ -50,7 +50,7 @@ Requires: step 0. Read `references/references.md`.
 - Capture every reference the same way the build will be captured: `node <skill>/scripts/shoot.mjs <url> --out cook/refs --name R01 --fold`.
 - Write `cook/refs/SOURCES.md`, `cook/SHOTS.md` (what to take from each one) and a short `cook/BRIEF.md` (40 lines max) from `templates/`.
 - Send the user a contact sheet of the references and ask which to cut. Their picks beat yours.
-- Redesign: put the old site beside a reference in `cook/compare/baseline/` and score the baseline with 2+ judges in `cook/judge/baseline/` (`references/redesign.md`).
+- Redesign: put the old site beside a reference in `cook/compare/baseline/` and score the baseline with 2+ judges in `cook/judge/baseline/` (`references/redesign.md`). A user rating of the old site is recorded (`calibration.baseline_user`) but does not change calibration.
 Done: `gate.mjs verify 1`.
 
 ## Step 2. Target mockup
@@ -60,7 +60,7 @@ Requires: step 1. One static frontend file, `cook/mockup/index.html` (a single f
 - Side by side with the closest references (cook's script does not create folders: `mkdir -p cook/compare/mockup` first): `node <cook>/scripts/side-by-side.mjs --aspect 16:10 --height 900 --out cook/compare/mockup/all.jpg <ref> <still> ...`. The height keeps the 1440x900 fold at full scale for the judges.
 - `slop_scan.mjs cook/mockup --out cook/reports/slop-mockup.json` must be clean.
 - Two fresh judges (`references/judge.md`) write `cook/judge/mockup/*.json`; `gate.mjs score mockup`.
-- - Redesign: the mockup carries the real content. Every covered heading, nav label, form field and CTA from the baseline inventory appears in it, or is listed under Copy changes or Dropped. Add a three-way sheet (old site, mockup, closest reference).
+- Redesign: the mockup carries the real content. The pages it covers come from a `Mockup covers: /,/pricing` line in BRIEF.md (default: the first page). Each covered page's h1, nav texts and form fields (by label or name) must appear in it, or be named on a Copy changes or Dropped line in KEEP.md. Add a three-way sheet (old site, mockup, closest reference).
 Show the user the stills, the scores and the gaps. Wait for their words. Then `gate.mjs approve mockup --quote "<their words>"`. If they dislike it, change the mockup, not the bar.
 Done: `gate.mjs verify 2`.
 
@@ -77,7 +77,7 @@ Done: `gate.mjs verify 4`.
 ## Step 5. Ban the slop
 
 Requires: step 4. `node <skill>/scripts/slop_scan.mjs --init` writes `cook/bans.json`. Read `references/slop.md`: the built-in bans the scanner enforces, the visual bans the judges enforce, and how the user adds their own. A ban is switched off only with the user's own words in `allowed`, and the scanner checks those words against their logged messages. Add a `Bans:` line to BRIEF.md.
-Redesign: `slop_scan.mjs src --baseline cook/baseline/slop.json --exclude <glob>`. Excluded files fail only on new slop. `verify 5` also checks the design files in the source folders: none may differ from the baseline commit, changed or untracked. Design files are markup and style; tests, config, server and API code, and logic files with no markup or style are not.
+Redesign: `slop_scan.mjs src --baseline cook/baseline/slop.json --exclude <glob> --out cook/reports/slop-step5.json` records the scan (it does not need zero errors); `verify 5` checks that the report covers every source folder and carries the sha1 of the final `bans.json`. Excluded files fail only on new slop. From 6a on, rounds compare against that report and need zero in-scope errors. `verify 5` also checks the design files in the source folders: none may differ from the baseline commit, changed or untracked. Design files are markup and style; tests, config, server and API code, and logic files with no markup or style are not.
 Done: `gate.mjs verify 5`.
 
 ## Step 6. Build step by step
@@ -92,7 +92,7 @@ Done: `gate.mjs verify 5`.
 2. **Fix it in depth.** Split independent sections across subagents; you integrate.
 3. **Stills:** `shoot.mjs <url> --out cook/stills/rNN --name S01 --fold` (add `--live --video 12` in 6b).
 4. **Side by side:** `mkdir -p cook/compare/rNN`, then cook's `side-by-side.mjs --aspect 16:10 --height 900` with reference/still pairs (the `-fold` stills) into `cook/compare/rNN/`.
-5. **Measure:** `slop_scan.mjs <src> --out cook/reports/slop-rNN.json` and `audit.mjs <url> --out cook/reports/audit-rNN.json`. Both must pass before judging; a failing build is not shown to judges. Redesign: `audit.mjs` on every page, and `regress.mjs --out cook/reports/regress-rNN.json` (inventory diff, probes, checks), which must be ok. Stills of every page, plus `shoot.mjs --steps '<json>' --suffix <state>` for interactive states.
+5. **Measure:** `slop_scan.mjs <src> --out cook/reports/slop-rNN.json` and `audit.mjs <url> --out cook/reports/audit-rNN.json`. Both must pass before judging; a failing build is not shown to judges. Redesign: `slop_scan.mjs` with `--baseline cook/reports/slop-step5.json` and the excludes, `audit.mjs` on every page, and `regress.mjs --out cook/reports/regress-rNN.json` (desktop-only: inventory diff of every baseline page, probes, checks), which must be ok. Stills of every page, plus `shoot.mjs --steps '<json>' --suffix <state>` for interactive states.
 6. **Judge:** 2+ fresh judges write `cook/judge/rNN/*.json` (each file is written once, and must be newer than the latest code change); `gate.mjs score rNN`. With 2 judges they must be within 1.0 of each other; with 3+, the lowest must be within 1.0 of the median. Otherwise add a judge or fix what the low one named.
 7. **Describe your own work:** update `cook/SECTIONS.md` (`references/feedback.md`).
 8. **Log** the round in `cook/ROUNDS.md` (cook's template), **send** the stills and a progress note, and keep going without waiting, except at the three approvals (mockup, static, final).
@@ -103,7 +103,7 @@ Requires: 6b. Read `references/feedback.md`. Every user remark becomes an inbox 
 
 ## Step 8. Separate judge
 
-Requires: 7. The final score comes from judges who did not build it: fresh subagents with zero context (2+), **plus a judge in a separate Claude Code session** (`/frontend-cook-judge <round>`). That separate judge must meet the bar on its own. The gate checks the guard log: a judge file must have been written by a session that never edited the build. A judge's own claim to be separate does not count. They see only the side-by-sides, the stills and the rubric. Target: the bar from step 3 after calibration. Redesign: `pair.mjs --round rNN` makes unlabeled old/new pairs; every judge must add an `ab` entry for every pair and prefer the new side in each one, and no dimension may end below its baseline. Then the user approves the final stills: `gate.mjs approve final --quote "..."`.
+Requires: 7. The final score comes from judges who did not build it: fresh subagents with zero context (2+), **plus a judge in a separate Claude Code session** (`/frontend-cook-judge <round>`). That separate judge must meet the bar on its own. The gate checks the guard log: a judge file must have been written by a session that never edited the build. A judge's own claim to be separate does not count. They see only the side-by-sides, the stills and the rubric. Target: the bar from step 3 after calibration. Redesign: `pair.mjs --round rNN` makes unlabeled old/new pairs for every baseline page at desktop and mobile; every judge must add an `ab` entry for every pair and prefer the new side in each one, and no dimension may end below its baseline. Scores are raw judge medians. Then the user approves the final stills: `gate.mjs approve final --quote "..."`.
 Done: `gate.mjs verify 8`. Then ship: final build check, then `gate.mjs report` (writes `cook/REPORT.md`: steps, overrides with the user's words, scores, slop and audit counts, Dropped items, motion allowances), and anything still below the bar.
 
 ## Never

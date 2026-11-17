@@ -67,10 +67,12 @@ Then in Claude Code, inside your project:
 For a site that already works and should be taken from 2/10 to 9/10 without breaking it. Setup, the references and the bar are the same; the difference is that the current site is measured first and every change is checked against it.
 
 - **Init:** `gate.mjs init --project X --mode redesign --src src --exclude 'src/legacy/**' --url http://localhost:5173 --pages /,/pricing`, then `set-checks --cmd "npm test" --cmd "npm run build"`.
-- **Baseline (step 0b):** `baseline.mjs` captures the current site's stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion and check results. You and the agent write `KEEP.md` (what must stay, what is dropped, in your words) and `probes.json` (form and menu checks, run against a dev or staging URL, never production; `baseline.mjs --probes-only` checks that each probe proves something). You approve the baseline at step 0b, with the stills shown. A dirty git tree is refused unless you agree.
+- **Baseline (step 0b):** `baseline.mjs` captures the current site's stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion and check results. It takes about 20 seconds per page, so run it with a long timeout or in the background. Every page is loaded twice; ids, links and nav items that differ between the loads are left out of the comparison. You and the agent write `KEEP.md` (what must stay, what is dropped, in your words) and `probes.json` (form and menu checks, run against a dev or staging URL, never production; `baseline.mjs --probes-only` checks that each probe proves something). You approve the baseline at step 0b, with the stills shown. After approval the baseline will not recapture until you reopen step 0b. A dirty git tree is refused unless you agree.
+- **KEEP.md:** every line under Dropped and Copy changes quotes your own words in double quotes, and names the item exactly in double quotes or backticks. A page or link drop names its path, such as `/blog`.
 - **Strategy:** in place by default, one stage at a time: tokens, shared components, sections top to bottom, dead CSS. A rebuild only with your words, and then the existing logic is ported, not rewritten.
-- **Every round:** `regress.mjs` diffs the page inventories against the baseline (a lost link, form field or heading fails unless `KEEP.md` names it), runs the probes and the checks.
-- **Judging:** the baseline is scored in step 1, like any round. In the final round `pair.mjs` builds unlabeled old/new pairs, and every judge must prefer the new side in every pair.
+- **Slop:** step 5 records the scan against the baseline. From the first code round on, the scan must show zero errors in your own code (excluded legacy files fail only on new slop).
+- **Every round:** `regress.mjs` diffs every baseline page's inventory against the baseline (a lost link, form field or heading fails unless `KEEP.md` names it; a page that disappears or returns an error fails unless its path is in Dropped; a new page only warns), runs the probes and the checks. It is desktop-only; check mobile with the stills and the audit.
+- **Judging:** the baseline is scored in step 1, like any round, and your rating of the old site is recorded without changing the calibration. In the final round `pair.mjs` builds unlabeled old/new pairs for every page at desktop and mobile, and every judge must prefer the new side in every pair. Scores are raw judge medians.
 - **Final report:** `gate.mjs report` writes `cook/REPORT.md`: before and after per dimension, slop and audit deltas, and every dropped item with your words.
 
 Full details: `skills/frontend-cook/references/redesign.md`.
@@ -94,6 +96,7 @@ Deliberate shell evasion is not stopped by the hook. A command written to get ar
 - The guard does not follow `cd` or symlinks when it decides which folder a command touches.
 - Moving `cook/` with `mv` is allowed; it is the documented restart.
 - Probe selectors match loosely unless `"exact": true` is set.
+- `regress.mjs` is desktop-only: the inventory diff and the probes run at desktop width. Mobile is checked by the stills and `audit.mjs`, not by regress.
 - Slop and motion allowances match the text of a line, so editing that line needs a new check.
 - An allowance covers every copy of a line; it cannot be limited to a count.
 - On macOS, file names that differ only by case are not treated as the same file.

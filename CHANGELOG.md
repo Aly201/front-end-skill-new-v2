@@ -20,6 +20,19 @@ Redesign mode: improve an existing site without breaking what works.
 - `gate.mjs report` writes `cook/REPORT.md`.
 - Preflight warns (not fatal) when Claude Code is not started in the project's git root, where a nested `.claude/settings.json` is not loaded.
 
+Second debate review:
+- Step 5 in redesign mode records the slop scan in `slop-step5.json` (with the final bans, checked by `bans_sha1`) instead of requiring zero errors. From 6a on, rounds compare against that report and need zero in-scope errors.
+- KEEP.md: every Dropped and Copy changes line quotes the user's words in double quotes, names its item exactly in double quotes or backticks, and page or link drops use the `/path`. On `old -> new` lines only the left side counts; a quote of 3+ words matches longer old copy.
+- Unstable ids, links and nav items: baseline loads each page twice and leaves out what differs; generated ids (React and Radix style) that disappear only warn.
+- Probes: a submit that becomes a full-page navigation fails; request expectations count only requests made after the steps; probes may change selectors but keep name, page, viewport and request expectations, and may not lose expectations after 0b.
+- Baseline pages: every baseline page is checked every round; a page that leaves the page list or returns an error needs a Dropped line with its path; new pages are warnings; `baseline.mjs` refuses to run again after 0b (reopen 0b to recapture).
+- Mockup: covers the pages on a `Mockup covers: /,/pricing` line in BRIEF.md (default the first page); checks h1, nav texts and form fields by label or name.
+- Comparisons use raw judge medians; a user rating of the old site is recorded and does not change the calibration.
+- A/B pairs cover every baseline page and viewport and must be fresh; the reference side-by-side is still required.
+- Page errors fail a round, new console errors warn, and a nav link moved elsewhere on the page warns.
+- Dev servers that change port no longer matter (links compare by path).
+- Baseline takes about 20 s per page; run it with a long timeout or in the background. `regress` is desktop-only.
+
 ## 1.2.0
 Fixes from an independent review of 1.1.0.
 - User words are verified against the prompts the user actually typed (logged by the guard hook); approvals expire when the stills change.
