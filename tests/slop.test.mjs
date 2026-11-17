@@ -266,3 +266,89 @@ test('CLI: --baseline and --exclude write new, fixed and remaining into the repo
   assert.match(after.new[0], /^purple-gradient\|src\/legacy\/old\.css\|/);
   assert.match(r3.stdout, /Baseline: 1 new, 1 fixed, 0 remaining/);
 });
+
+// ---------- counted novelty and folder excludes ----------
+test('a fingerprint is counted: extra copies of a baseline finding in an excluded file are new', () => {
+  const proj = baselineProject();
+  const src = join(proj, 'src');
+  writeFileSync(join(src, 'legacy', 'old.css'), 'body{background:#F5F5DC}\n' + PURPLE_LINE);
+  const baseline = scan([src], null, { cwd: proj });
+  assert.equal(baseline.findings.filter((f) => f.id === 'purple-gradient').length, 1);
+
+  // The reported bypass: two more copies of the same purple rule, appended after the baseline.
+  writeFileSync(join(src, 'legacy', 'old.css'), 'body{background:#F5F5DC}\n' + PURPLE_LINE + PURPLE_LINE + PURPLE_LINE);
+  const r = scan([src], null, { cwd: proj, baseline, exclude: ['src/legacy/**'] });
+  assert.equal(r.ok, false, 'appended purple rules fail the scan');
+  const purple = r.findings.filter((f) => f.id === 'purple-gradient');
+  assert.equal(purple.length, 3);
+  assert.deepEqual(purple.map((f) => f.is_new), [false, true, true]);
+  assert.ok(purple.every((f) => f.in_scope === false));
+  assert.deepEqual(r.new, [purple[1].fingerprint, purple[2].fingerprint]);
+  assert.deepEqual([...r.remaining].sort(), [BEIGE_FP, purple[0].fingerprint].sort());
+  assert.deepEqual(r.fixed, []);
+});
+
+test('fixed counts baseline occurrences that disappeared', () => {
+  const proj = baselineProject();
+  const src = join(proj, 'src');
+  writeFileSync(join(src, 'legacy', 'old.css'), 'body{background:#F5F5DC}\n' + PURPLE_LINE + PURPLE_LINE);
+  const baseline = scan([src], null, { cwd: proj });
+  writeFileSync(join(src, 'legacy', 'old.css'), 'body{background:#F5F5DC}\n' + PURPLE_LINE);
+  const r = scan([src], null, { cwd: proj, baseline, exclude: ['src/legacy/**'] });
+  assert.equal(r.ok, true, 'fewer findings than the baseline passes');
+  assert.deepEqual(r.new, []);
+  assert.deepEqual(r.fixed, ['purple-gradient|src/legacy/old.css|#6366f1']);
+});
+
+test('reformatting a legacy file adds nothing new', () => {
+  const proj = baselineProject();
+  const src = join(proj, 'src');
+  writeFileSync(join(src, 'legacy', 'old.css'), 'body{background:#F5F5DC}\n' + PURPLE_LINE);
+  const baseline = scan([src], null, { cwd: proj });
+  const reformatted = [
+    '',
+    '',
+    '  body {',
+    '      background: #F5F5DC;',
+    '  }',
+    '',
+    '  .hero {',
+    '    background:',
+    '      linear-gradient(',
+    '        135deg,',
+    '        #6366f1,',
+    '        #4f46e5',
+    '      );',
+    '  }',
+    '',
+  ].join('\n');
+  writeFileSync(join(src, 'legacy', 'old.css'), reformatted);
+  const r = scan([src], null, { cwd: proj, baseline, exclude: ['src/legacy/**'] });
+  assert.equal(r.findings.length, baseline.findings.length, 'same findings');
+  assert.notDeepEqual(r.findings.map((f) => f.line), baseline.findings.map((f) => f.line), 'lines moved');
+  assert.deepEqual(r.new, []);
+  assert.deepEqual(r.fixed, []);
+  assert.deepEqual(r.remaining, baseline.findings.map((f) => f.fingerprint));
+  assert.equal(r.ok, true);
+});
+
+test('--exclude with a plain folder, a trailing slash or ./ marks findings out of scope', () => {
+  const proj = baselineProject();
+  const src = join(proj, 'src');
+  for (const pattern of ['src/legacy', 'src/legacy/', './src/legacy']) {
+    const r = scan([src], null, { cwd: proj, exclude: [pattern] });
+    const beige = r.findings.find((f) => f.id === 'beige');
+    assert.ok(beige, `beige found with ${pattern}`);
+    assert.equal(beige.in_scope, false, `${pattern} excludes src/legacy`);
+    const fresh = r.findings.filter((f) => f.file.endsWith('new.css'));
+    assert.ok(fresh.every((f) => f.in_scope), `${pattern} keeps src/new.css in scope`);
+  }
+  const run = (...args) => spawnSync(process.execPath, [CLI, 'src', ...args], { cwd: proj, encoding: 'utf8' });
+  const r1 = run('--out', 'rep/plain-base.json');
+  assert.equal(r1.status, 1, r1.stdout + r1.stderr);
+  const r2 = run('--baseline', 'rep/plain-base.json', '--exclude', 'src/legacy', '--out', 'rep/plain-now.json');
+  assert.equal(r2.status, 0, r2.stdout + r2.stderr);
+  const now = JSON.parse(readFileSync(join(proj, 'rep', 'plain-now.json'), 'utf8'));
+  assert.deepEqual(now.exclude, ['src/legacy']);
+  assert.equal(now.findings.find((f) => f.id === 'beige').in_scope, false);
+});

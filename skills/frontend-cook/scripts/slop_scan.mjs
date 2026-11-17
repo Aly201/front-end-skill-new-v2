@@ -5,17 +5,20 @@
 //                           [--baseline cook/baseline/slop.json] [--exclude <glob>]...
 //        node slop_scan.mjs --init [--bans cook/bans.json]   write the default bans file
 //
-// --baseline: an earlier slop report. Each finding is fingerprinted as id|file|text (no line number),
-//   so findings already in the baseline are "remaining" and only new ones are "is_new".
-// --exclude: a glob (relative to the current directory, '/' separators). Excluded files are still
-//   scanned; their findings are out of scope, so they fail the scan only when they are new.
+// --baseline: an earlier slop report. Each finding is fingerprinted as id|file|text (no line number).
+//   Findings are counted per fingerprint: if the baseline has N findings with a fingerprint, the first N
+//   findings with that fingerprint are "remaining"; any extra ones are "is_new". "fixed" lists the baseline
+//   occurrences that no longer appear.
+// --exclude: a glob or a folder (relative to the current directory, '/' separators; `src/legacy`,
+//   `src/legacy/` and `./src/legacy` all work). Excluded files are still scanned; their findings are out of
+//   scope, so they fail the scan only when they are new.
 //
 // The bans file can switch a rule off only with the user's own words:
 //   { "allowed": [ { "id": "em-dash", "quote": "em dashes are fine in the blog copy" } ],
 //     "extra":   [ { "id": "no-blue", "pattern": "#0000ff", "flags": "i", "message": "no pure blue" } ] }
 import { readFileSync, writeFileSync, mkdirSync, statSync, existsSync } from 'node:fs';
 import { dirname, extname, relative, resolve, sep } from 'node:path';
-import { walk, isMain, MOTION_CODE, projectRoot, userSaid, globToRe } from './_common.mjs';
+import { walk, isMain, MOTION_CODE, projectRoot, userSaid, isExcluded } from './_common.mjs';
 
 const MARKUP = ['.html', '.htm', '.jsx', '.tsx', '.vue', '.svelte', '.astro', '.md', '.mdx'];
 const SCRIPT = ['.js', '.mjs', '.cjs', '.ts'];
@@ -285,13 +288,11 @@ const finding = (r, file, line, hit) => ({ id: r.id, severity: r.sev, file, line
 const PROJECT = '(project)';
 const relPath = (file, root) => (file === PROJECT ? PROJECT : relative(root, resolve(root, file)).split(sep).join('/'));
 const fingerprintOf = (f, root) => `${f.id}|${relPath(f.file, root)}|${f.text}`;
-const uniq = (xs) => [...new Set(xs)];
 
 // opts: { baseline: report object or null, baselinePath: path shown in the report, exclude: [globs], cwd }
 export function scan(targets, bansPath, opts = {}) {
   const cwd = resolve(opts.cwd || process.cwd());
-  const exclude = (opts.exclude || []).map((g) => String(g).replace(/\\/g, '/').replace(/^\.\//, ''));
-  const excludeRes = exclude.map(globToRe);
+  const exclude = (opts.exclude || []).map((g) => String(g).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, ''));
   const bans = loadBans(bansPath);
   const allowed = new Map();
   const findings = [];
@@ -380,17 +381,27 @@ export function scan(targets, bansPath, opts = {}) {
     findings.push({ id: 'font-sprawl', severity: 'warn', file: '(project)', line: 0, text: named.join(', '), message: 'More than 3 named typefaces.' });
   }
   // Fingerprints, scope and novelty. Project-level findings are always in scope.
+  // Counted: a fingerprint that appears N times in the baseline allows its first N occurrences; extra ones are new.
   const base = opts.baseline && Array.isArray(opts.baseline.findings) ? opts.baseline : null;
-  const baseSet = base ? new Set(base.findings.map((b) => b.fingerprint || fingerprintOf(b, resolve(base.cwd || cwd)))) : null;
+  const baseCount = new Map();
+  if (base) {
+    for (const b of base.findings) {
+      const fp = b.fingerprint || fingerprintOf(b, resolve(base.cwd || cwd));
+      baseCount.set(fp, (baseCount.get(fp) || 0) + 1);
+    }
+  }
+  const seen = new Map();
   for (const f of findings) {
     f.fingerprint = fingerprintOf(f, cwd);
-    f.in_scope = f.file === PROJECT || !excludeRes.some((re) => re.test(relPath(f.file, cwd)));
-    f.is_new = baseSet ? !baseSet.has(f.fingerprint) : true;
+    f.in_scope = f.file === PROJECT || !isExcluded(relPath(f.file, cwd), exclude);
+    const n = (seen.get(f.fingerprint) || 0) + 1;
+    seen.set(f.fingerprint, n);
+    f.is_new = base ? n > (baseCount.get(f.fingerprint) || 0) : true;
   }
-  const newFp = uniq(findings.filter((f) => f.is_new).map((f) => f.fingerprint));
-  const remaining = uniq(findings.filter((f) => !f.is_new).map((f) => f.fingerprint));
-  const current = new Set(findings.map((f) => f.fingerprint));
-  const fixed = baseSet ? [...baseSet].filter((fp) => !current.has(fp)) : [];
+  const newFp = findings.filter((f) => f.is_new).map((f) => f.fingerprint);
+  const remaining = findings.filter((f) => !f.is_new).map((f) => f.fingerprint);
+  const fixed = [];
+  for (const [fp, n] of baseCount) for (let i = seen.get(fp) || 0; i < n; i++) fixed.push(fp);
 
   const errors = findings.filter((x) => x.severity === 'error').length;
   // An error fails when it is in scope, or when it is new (an excluded error that already existed does not fail).
