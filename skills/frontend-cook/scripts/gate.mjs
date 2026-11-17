@@ -5,10 +5,18 @@
 //
 // Commands (run from the project root):
 //   init --project <name>                 create cook/GATES.json (needs a passing cook/PREFLIGHT.json)
+//   init --project <name> --mode redesign --src <dir> [--src ...] --url <base url>
+//                                         [--exclude <glob> ...] [--pages /,/pricing]
+//                                         an existing site: steps include 0b (baseline)
+//   set-pages /,/pricing                  pages that matter (each gets stills, inventory, audit)
+//   set-checks --cmd "npm test" [--cmd ...]   commands that must keep passing (replaces the list)
+//   set-strategy --in-place | --rebuild --quote "<user words>"
+//   motion-allow <file> <hash> --reason "..."   allow one existing animation line (hash from motion.json)
+//   allow-dirty --quote "<user words>"    the baseline may be taken on a dirty tree
 //   status                                every step, its state and the next step
 //   check <step>                          may this step start? (previous steps passed, inputs present)
 //   verify <step>                         is this step done? marks it passed only when every proof holds
-//   approve <mockup|static|final> --quote "<user's exact words>"
+//   approve <mockup|static|final|baseline> --quote "<user's exact words>"
 //   override <step> --quote "<user's exact words>" --reason "<why>"   user takes responsibility, logged
 //   reopen <step>                         set this step and every later one back to pending
 //   set-bar --judge 9.2 --floor 8.5 --similarity 99 [--mockup 8] [--quote "..."]
@@ -25,14 +33,18 @@
 // Steps: 0 setup, 1 references, 2 mockup, 3 bar, 4 time, 5 bans, 6a static build,
 //        6b motion, 7 feedback, 8 separate judge.
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve, extname, basename, relative } from 'node:path';
+import { join, resolve, extname, basename, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
-import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, MOTION_CODE, FRONTEND_EXT, readLedger, activeHours, userSaid } from './_common.mjs';
+import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, MOTION_CODE, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, pageSlug } from './_common.mjs';
 
 export const STEPS = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
+// An existing site (mode redesign) starts with the baseline, step 0b.
+export const STEPS_REDESIGN = ['0', '0b', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
+export function stepsFor(g) { return g?.mode === 'redesign' ? STEPS_REDESIGN : STEPS; }
 export const STEP_NAMES = {
   0: 'Setup: cook skill, Inspo MCP, Awwwards MCP, browser',
+  '0b': 'Baseline: capture, keep list and probes',
   1: 'Strong references (9 to 12)',
   2: 'Target mockup',
   3: 'Bar set as numbers',
@@ -61,11 +73,38 @@ function save(g) { writeFileSync(GATES, JSON.stringify(g, null, 2) + '\n'); }
 function fail(msg) { console.error(`gate: ${msg}`); process.exit(2); }
 const argv = process.argv.slice(2);
 const opt = (k, d = null) => { const i = argv.indexOf(k); return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : d; };
+// Every value of a repeatable option: --src a --src b gives ['a', 'b'].
+const optAll = (k) => argv.flatMap((a, i) => (a === k && argv[i + 1] !== undefined ? [argv[i + 1]] : []));
 const quoteOk = (q) => typeof q === 'string' && q.trim().length >= 8;
 const escapeRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // True when the number appears as a number of its own (not inside 99% or 9.25).
 const numberIn = (text, n) => new RegExp(`(^|[^\\d.])${escapeRe(n)}(?![\\d.])`).test(text || '');
-const roundRank = (r) => (r === 'mockup' ? -1 : Number(String(r).replace(/^r/i, '')));
+// Rounds in calibration order: the baseline (the old site) first, then the mockup, then r01, r02...
+const roundRank = (r) => (r === 'baseline' ? -2 : r === 'mockup' ? -1 : Number(String(r).replace(/^r/i, '')));
+// Pages: '/' , '/pricing' or full URLs. Duplicates are dropped.
+function parsePages(v) {
+  const list = [...new Set(String(v ?? '').split(',').map((p) => p.trim()).filter(Boolean))];
+  if (!list.length) fail('pages: list them comma-separated, e.g. /,/pricing');
+  const bad = list.filter((p) => !(p.startsWith('/') || /^https?:\/\//i.test(p)));
+  if (bad.length) fail(`pages must start with / or be full URLs: ${bad.join(', ')}`);
+  return list;
+}
+function readText(p) { try { return readFileSync(p, 'utf8'); } catch { return ''; } }
+// The lines under one "## <name>" heading of a markdown file (up to the next heading of level 1 to 3).
+function sectionOf(md, name) {
+  const out = [];
+  let on = false;
+  for (const l of String(md).split('\n')) {
+    const h = /^(#{1,3})\s+(.+?)\s*$/.exec(l);
+    if (h) { on = h[1] === '##' && h[2].toLowerCase() === name.toLowerCase(); continue; }
+    if (on) out.push(l);
+  }
+  return out.join('\n');
+}
+// The "## " headings of a markdown file, lower-cased.
+function h2Set(md) {
+  return new Set(String(md).split('\n').map((l) => /^##\s+(.+?)\s*$/.exec(l)).filter(Boolean).map((m) => m[1].toLowerCase()));
+}
 
 // The user's exact words: 8+ characters that the user typed in this project. The guard hook
 // logs the user's prompts to the ledger; the words must appear there.
@@ -93,6 +132,7 @@ function hoursElapsed(g) { return g.time?.started ? (Date.now() - Date.parse(g.t
 // The stills a person approves: the mockup's, or the latest round's.
 function stillsFor(kind) {
   if (kind === 'mockup') return S('stills', 'mockup');
+  if (kind === 'baseline') return S('baseline', 'stills');
   const r = latestRound();
   return r ? S('stills', r) : null;
 }
@@ -246,9 +286,9 @@ function judgeChecks(g, round, stage, than) {
 
 // ---------------- requirements to START a step ----------------
 function startChecks(g, step) {
-  const i = STEPS.indexOf(step);
+  const i = stepsFor(g).indexOf(step);
   const out = [];
-  for (const prev of STEPS.slice(0, i)) out.push(C.stepPassed(g, prev));
+  for (const prev of stepsFor(g).slice(0, i)) out.push(C.stepPassed(g, prev));
   if (step !== '0') out.push(C.preflight());
   if (step === '6b' && g.motion !== 'none') {
     const motionDir = (() => { try { return readdirSync(S('refs', 'motion')).length > 0; } catch { return false; } })();
@@ -259,17 +299,115 @@ function startChecks(g, step) {
   return out;
 }
 
+// ---------------- redesign: step 0b, the baseline of the old site ----------------
+const VIEWPORTS = ['desktop', 'mobile'];
+const KEEP_HEADINGS = ['Keep', 'Dropped', 'Copy changes', 'Motion'];
+function baselineChecks(g) {
+  const out = [];
+  const B = (...p) => S('baseline', ...p);
+  const pages = g.pages?.length ? g.pages : ['/'];
+  const meta = readJson(B('meta.json'));
+  for (const f of ['meta.json', 'inventory.json', 'motion.json', 'checks.json', 'slop.json']) out.push(C.file(B(f), `baseline ${f}`));
+  const inv = readJson(B('inventory.json'));
+  const missingInv = pages.filter((p) => !inv?.pages?.[p]);
+  out.push([Boolean(inv) && missingInv.length === 0, !inv ? 'baseline inventory.json is not readable'
+    : missingInv.length ? `baseline inventory has no entry for ${missingInv.join(', ')}` : `baseline inventory covers every page (${pages.join(', ')})`]);
+  // Stills: every page, both viewports, full and folded.
+  const stills = [];
+  for (const p of pages) for (const vp of VIEWPORTS) for (const fold of ['', '-fold']) {
+    const rel = `${pageSlug(p)}-${vp}${fold}.png`;
+    if (!existsSync(B('stills', rel))) stills.push(`cook/baseline/stills/${rel}`);
+  }
+  out.push(stills.length ? [false, `baseline stills missing: ${stills.join(', ')}`]
+    : [true, `baseline stills exist for every page (${pages.length}), desktop and mobile, full and fold`]);
+  const audits = pages.map((p) => `audit-${pageSlug(p)}.json`).filter((f) => !existsSync(B(f)));
+  out.push(audits.length ? [false, `baseline audits missing: ${audits.map((f) => `cook/baseline/${f}`).join(', ')}`]
+    : [true, 'a baseline audit exists for every page']);
+  // A dirty tree is the user's choice, with their words.
+  if (meta?.dirty === true) out.push([quoteOk(g.dirty_quote), quoteOk(g.dirty_quote)
+    ? `baseline taken on a dirty tree, the user said: "${g.dirty_quote}"`
+    : 'baseline was taken on a dirty tree without the user\'s words: gate.mjs allow-dirty --quote "..."']);
+  else out.push([Boolean(meta), meta ? 'baseline taken on a clean tree' : 'baseline meta.json is not readable']);
+  // KEEP.md: the four headings, and every motion hit classified in the Motion section.
+  if (!existsSync(B('KEEP.md'))) out.push([false, 'cook/baseline/KEEP.md missing (write the keep list with the user: Keep, Dropped, Copy changes, Motion)']);
+  else {
+    const keep = readText(B('KEEP.md'));
+    const heads = h2Set(keep);
+    const noHead = KEEP_HEADINGS.filter((h) => !heads.has(h.toLowerCase()));
+    out.push(noHead.length ? [false, `KEEP.md is missing ${noHead.map((h) => `## ${h}`).join(', ')}`]
+      : [true, 'KEEP.md has the four headings: Keep, Dropped, Copy changes, Motion']);
+    const hits = Array.isArray(readJson(B('motion.json'))) ? readJson(B('motion.json')) : [];
+    const motionLines = sectionOf(keep, 'Motion').split('\n');
+    const unclassified = hits.filter((h) => !motionLines.some((l) => l.includes(h.hash) && /functional|decorative/i.test(l) && /keep|replace|remove/i.test(l)));
+    out.push(unclassified.length ? [false, `motion hits not classified in KEEP.md ## Motion (functional or decorative, keep, replace or remove): ${unclassified.slice(0, 5).map((h) => `${h.file}:${h.line}`).join(', ')}`]
+      : [true, `every motion hit (${hits.length}) is classified in KEEP.md ## Motion`]);
+  }
+  // Probes: one per form, each one fills or clicks something, and each page with a form has one.
+  const probes = readJson(B('probes.json'));
+  if (!Array.isArray(probes)) out.push([false, 'cook/baseline/probes.json missing or not a JSON array (one probe per form: templates/probes.example.json)']);
+  else {
+    const acting = probes.filter((p) => Array.isArray(p?.steps) && p.steps.some((s) => s && (s.fill || s.click)));
+    const formsBy = Object.entries(inv?.pages || {}).map(([page, p]) => [page, (p?.forms || []).length]).filter(([, n]) => n > 0);
+    const total = formsBy.reduce((a, [, n]) => a + n, 0);
+    out.push([acting.length >= total, `${acting.length} probe(s) that fill or click, for ${total} form(s) in the inventory (need one per form)`]);
+    for (const [page, n] of formsBy) {
+      const ok = acting.some((p) => p.page === page);
+      out.push([ok, ok ? `a probe covers the form(s) on ${page}` : `no probe on ${page} for its ${n} form(s): add one to cook/baseline/probes.json with "page": "${page}"`]);
+    }
+  }
+  out.push(C.approval(g, 'baseline'));
+  return out;
+}
+
+// Redesign, verify 2: every h1 and form field of the old site is in the mockup, or waived under Dropped / Copy changes.
+function redesignMockupChecks() {
+  const out = [];
+  const inv = readJson(S('baseline', 'inventory.json'));
+  if (!inv?.pages) return [[false, 'baseline inventory missing: nothing to check the mockup against (verify 0b first)']];
+  const html = readText(S('mockup', 'index.html')).toLowerCase();
+  const keep = readText(S('baseline', 'KEEP.md'));
+  const waived = `${sectionOf(keep, 'Dropped')}\n${sectionOf(keep, 'Copy changes')}`.toLowerCase();
+  const missing = [];
+  let terms = 0;
+  for (const [page, p] of Object.entries(inv.pages)) {
+    const names = [
+      ...(p?.headings || []).filter((h) => h.level === 1).map((h) => h.text),
+      ...(p?.forms || []).flatMap((f) => (f.fields || []).map((x) => x.name)),
+    ].map((t) => String(t ?? '').trim()).filter(Boolean);
+    for (const t of new Set(names)) {
+      terms++;
+      const k = t.toLowerCase();
+      if (!html.includes(k) && !waived.includes(k)) missing.push(`"${t}" (${page})`);
+    }
+  }
+  out.push(missing.length === 0 ? [true, `mockup covers the baseline: ${terms} h1 and form field name(s) found in cook/mockup or waived in KEEP.md`]
+    : [false, `mockup does not cover the baseline: missing ${missing.slice(0, 12).join(', ')}${missing.length > 12 ? ` and ${missing.length - 12} more` : ''}. Keep them, or list them under Dropped / Copy changes in KEEP.md`]);
+  const three = images(S('compare', 'mockup')).filter((f) => /three|3way/i.test(basename(f)));
+  out.push(three.length ? [true, `three-way sheet: ${basename(three[0])} (old site, mockup, closest reference)`]
+    : [false, 'no three-way sheet in cook/compare/mockup (name it with "three" or "3way": old site, mockup, closest reference)']);
+  return out;
+}
+
 // ---------------- proof that a step is DONE ----------------
 function doneChecks(g, step) {
   const out = [];
   switch (step) {
     case '0': out.push(C.preflight()); break;
+    case '0b': out.push(...baselineChecks(g)); break;
     case '1': {
       out.push(C.file(S('BRIEF.md'), 'BRIEF.md'));
       const lines = brief().split('\n').filter((l) => l.trim()).length;
       out.push([lines > 0 && lines <= 40, `BRIEF.md is ${lines} lines (keep it short: 40 max, the references carry the look)`]);
       out.push([briefLine('Target') !== null, 'BRIEF.md has a "Target:" line']);
       out.push([briefLine("User's words") !== null, 'BRIEF.md has a "User\'s words:" line']);
+      if (g.mode === 'redesign') {
+        const kept = nonEmpty(S('compare', 'baseline'));
+        out.push([kept, kept ? 'cook/compare/baseline has the old site beside a reference' : 'cook/compare/baseline is empty: put the old site beside a reference there (reference left, old site right)']);
+        const bs = summaryFor('baseline');
+        out.push([(bs?.judges ?? 0) >= 2, bs ? `baseline scored by ${bs.judges} judge(s) (need 2+)` : 'no judge summary for the baseline: have 2+ fresh judges write cook/judge/baseline/*.json, then gate.mjs score baseline']);
+        out.push(...judgeProvenance('baseline'));
+        out.push([briefLine('Keep') !== null, 'BRIEF.md has a "Keep:" line (what must survive the redesign)']);
+      }
       const ids = refIds();
       out.push([ids.size >= 9 && ids.size <= 12, `${ids.size} reference(s) in cook/refs (need 9 to 12, named R01...)`]);
       for (const [id, files] of ids) {
@@ -335,6 +473,7 @@ function doneChecks(g, step) {
       out.push(C.reportOk('slop-mockup.json', newest, 'slop scan of the mockup', { target: resolve(S('mockup')) }));
       const anim = motionCodeIn(files);
       out.push([anim.length === 0, anim.length ? `animation code in the mockup (it must be static): ${anim.join(', ')}` : 'mockup is static']);
+      if (g.mode === 'redesign') out.push(...redesignMockupChecks());
       out.push(...judgeChecks(g, 'mockup', 'mockup', newest));
       out.push(C.approval(g, 'mockup'));
       break;
@@ -348,6 +487,12 @@ function doneChecks(g, step) {
       const bar = briefLine('Bar');
       const barOk = Boolean(bar) && numberIn(bar, t.judge) && numberIn(bar, t.floor);
       out.push([barOk, !bar ? `BRIEF.md has no "Bar:" line` : barOk ? `BRIEF.md Bar: ${bar}` : `BRIEF.md Bar line must show ${t.judge} and ${t.floor} as numbers (a bare "99%" is not "9"): ${bar}`]);
+      if (g.mode === 'redesign') {
+        out.push([t.delta === true, t.delta === true ? 'the bar carries the baseline rule (target.delta)' : 'the bar has no baseline rule yet: run gate.mjs set-bar']);
+        const bs = summaryFor('baseline');
+        out.push(bs ? [true, `no dimension may end below the baseline (baseline overall ${bs.raw?.overall}, cook/judge/baseline/summary.json)`]
+          : [false, 'no dimension may end below the baseline: cook/judge/baseline/summary.json missing (score the baseline)']);
+      }
       break;
     }
     case '4': {
@@ -476,7 +621,7 @@ function doneChecks(g, step) {
       out.push(C.approval(g, 'final'));
       break;
     }
-    default: fail(`unknown step ${step}. Steps: ${STEPS.join(', ')}`);
+    default: fail(`unknown step ${step}. Steps: ${stepsFor(g).join(', ')}`);
   }
   return out;
 }
@@ -518,7 +663,7 @@ function print(title, checks) {
   return bad === 0;
 }
 
-function nextStep(g) { return STEPS.find((s) => !['passed', 'overridden'].includes(g.steps[s]?.status)) || null; }
+function nextStep(g) { return stepsFor(g).find((s) => !['passed', 'overridden'].includes(g.steps[s]?.status)) || null; }
 
 // ---------------- score ----------------
 export function scoreRound(dir, offset = 0) {
@@ -566,15 +711,28 @@ if (isMainRun) {
       if (existsSync(GATES)) fail('cook/GATES.json already exists. Use status, or move cook/ to cook-archive/<date>/ to start over.');
       const project = opt('--project');
       if (!project) fail('init needs --project <name>');
+      const mode = opt('--mode', 'new');
+      if (!['new', 'redesign'].includes(mode)) fail('init --mode new|redesign');
+      const srcs = optAll('--src'), excludes = optAll('--exclude');
+      const url = opt('--url');
+      const pagesArg = opt('--pages');
+      const pages = pagesArg === null ? ['/'] : parsePages(pagesArg);
+      if (mode === 'new' && (srcs.length || excludes.length || url !== null)) fail('--src, --exclude and --url are for init --mode redesign');
+      if (mode === 'redesign') {
+        if (!srcs.length || !url) fail('init --mode redesign needs --src <dir> (repeat for more folders) and --url <base url of the running site>');
+        const missing = srcs.filter((s) => !existsSync(resolve(root, s)));
+        if (missing.length) fail(`source folder not found: ${missing.join(', ')}`);
+      }
       mkdirSync(S(), { recursive: true });
       const g = {
-        version: 1, project, created: new Date().toISOString(),
+        version: 1, project, created: new Date().toISOString(), mode,
         target: { judge: 9.2, floor: 8.5, similarity: 99, mockup: 8.0 },
-        time: null, build: null, motion: null,
+        time: null, build: null, motion: null, pages,
         calibration: { offset: 0, history: [] },
         approvals: {}, overrides: {},
-        steps: Object.fromEntries(STEPS.map((s) => [s, { status: 'pending' }])),
       };
+      if (mode === 'redesign') { g.scope = { src: srcs, exclude: excludes }; g.build = { src: srcs[0], url }; }
+      g.steps = Object.fromEntries(stepsFor(g).map((s) => [s, { status: 'pending' }]));
       save(g);
       const pre = C.preflight();
       if (pre[0]) { g.steps['0'] = { status: 'passed', at: new Date().toISOString(), evidence: [pre[1]] }; save(g); }
@@ -584,8 +742,9 @@ if (isMainRun) {
     case 'status': {
       const g = load();
       console.log(`Project: ${g.project}   Bar: ${g.target.judge}/10 (floor ${g.target.floor})   Calibration offset: ${g.calibration.offset}`);
+      if (g.mode === 'redesign') console.log(`Mode: redesign of an existing site (baseline first). Pages: ${(g.pages || ['/']).join(', ')}`);
       if (g.time) console.log(`Time: ${g.time.mode} ${g.time.hours}h, ${hoursElapsed(g).toFixed(1)}h elapsed`);
-      for (const s of STEPS) {
+      for (const s of stepsFor(g)) {
         const st = g.steps[s] || { status: 'pending' };
         console.log(`  ${s.padEnd(3)} ${st.status.toUpperCase().padEnd(10)} ${STEP_NAMES[s]}${st.status === 'overridden' ? `  (user: "${g.overrides[s]?.quote}")` : ''}`);
       }
@@ -597,29 +756,35 @@ if (isMainRun) {
     }
     case 'check': {
       const g = load();
-      if (!STEPS.includes(a1)) fail(`check needs a step: ${STEPS.join(', ')}`);
+      if (!stepsFor(g).includes(a1)) fail(`check needs a step: ${stepsFor(g).join(', ')}`);
       process.exit(print(`May step ${a1} (${STEP_NAMES[a1]}) start?`, startChecks(g, a1)) ? 0 : 1);
       break;
     }
     case 'verify': {
       const g = load();
-      if (!STEPS.includes(a1)) fail(`verify needs a step: ${STEPS.join(', ')}`);
+      if (!stepsFor(g).includes(a1)) fail(`verify needs a step: ${stepsFor(g).join(', ')}`);
       const pre = startChecks(g, a1);
       const done = doneChecks(g, a1);
       const ok = print(`Is step ${a1} (${STEP_NAMES[a1]}) done?`, [...pre, ...done]);
-      if (ok) { g.steps[a1] = { status: 'passed', at: new Date().toISOString(), evidence: done.map(([, m]) => m) }; save(g); console.log(`Step ${a1} marked PASSED.`); }
+      if (ok) {
+        g.steps[a1] = { status: 'passed', at: new Date().toISOString(), evidence: done.map(([, m]) => m) };
+        // The baseline's commit and tree state travel with the gates, for the final report and the regress check.
+        if (a1 === '0b') { const m = readJson(S('baseline', 'meta.json')) || {}; g.baseline = { commit: m.commit ?? null, dirty: m.dirty === true, at: m.at ?? null }; }
+        save(g); console.log(`Step ${a1} marked PASSED.`);
+      }
       process.exit(ok ? 0 : 1);
       break;
     }
     case 'approve': {
       const g = load();
-      if (!['mockup', 'static', 'final'].includes(a1)) fail('approve mockup|static|final --quote "<user words>"');
+      if (!['mockup', 'static', 'final', 'baseline'].includes(a1)) fail('approve mockup|static|final|baseline --quote "<user words>"');
       const q = opt('--quote');
       needUserWords(q);
       // The approval is tied to the stills the user saw: a newer still makes it stale.
       const dir = stillsFor(a1);
       const imgs = dir ? images(dir) : [];
-      if (!imgs.length) fail(`no stills to approve yet for ${a1}: show the user the stills first (${a1 === 'mockup' ? 'cook/stills/mockup' : 'cook/stills/<round>'})`);
+      const where = { mockup: 'cook/stills/mockup', baseline: 'cook/baseline/stills' }[a1] || 'cook/stills/<round>';
+      if (!imgs.length) fail(`no stills to approve yet for ${a1}: show the user the stills first (${where})`);
       g.approvals[a1] = { quote: q, at: new Date().toISOString(), shown: newestMtime(imgs) };
       save(g);
       console.log(`recorded ${a1} approval: "${q}"`);
@@ -627,7 +792,7 @@ if (isMainRun) {
     }
     case 'override': {
       const g = load();
-      if (!STEPS.includes(a1) || a1 === '0') fail('override <step 1-8> --quote "<user words>" --reason "<why>" (setup cannot be overridden: the other skills are required)');
+      if (!stepsFor(g).includes(a1) || a1 === '0') fail('override <step 1-8> --quote "<user words>" --reason "<why>" (setup cannot be overridden: the other skills are required)');
       const q = opt('--quote'), reason = opt('--reason');
       if (!reason) fail('an override needs a --reason');
       needUserWords(q);
@@ -639,13 +804,15 @@ if (isMainRun) {
     }
     case 'reopen': {
       const g = load();
-      const i = STEPS.indexOf(a1); if (i < 0) fail('reopen <step>');
-      for (const s of STEPS.slice(i)) g.steps[s] = { status: 'pending' };
-      if (i <= STEPS.indexOf('2')) delete g.approvals.mockup;
-      if (i <= STEPS.indexOf('6a')) delete g.approvals.static;
+      const steps = stepsFor(g);
+      const i = steps.indexOf(a1); if (i < 0) fail('reopen <step>');
+      for (const s of steps.slice(i)) g.steps[s] = { status: 'pending' };
+      if (i <= steps.indexOf('0b')) delete g.approvals.baseline;
+      if (i <= steps.indexOf('2')) delete g.approvals.mockup;
+      if (i <= steps.indexOf('6a')) delete g.approvals.static;
       delete g.approvals.final;
       save(g);
-      console.log(`steps ${STEPS.slice(i).join(', ')} set back to pending`);
+      console.log(`steps ${steps.slice(i).join(', ')} set back to pending`);
       break;
     }
     case 'set-bar': {
@@ -666,7 +833,9 @@ if (isMainRun) {
         if (!quoteOk(q)) fail('a bar below 9.0 (or 8.5 floor, 8 mockup), or any lowering, needs the user\'s words: --quote "..."');
         needUserWords(q);
       }
-      g.target = { judge, floor, similarity: sim, mockup: mock, ...(needQuote ? { lowered_by_user: q } : t.lowered_by_user ? { lowered_by_user: t.lowered_by_user } : {}) };
+      // In redesign mode no dimension may end below the baseline: the bar carries that rule.
+      const delta = g.mode === 'redesign' || t.delta === true ? { delta: true } : {};
+      g.target = { judge, floor, similarity: sim, mockup: mock, ...delta, ...(needQuote ? { lowered_by_user: q } : t.lowered_by_user ? { lowered_by_user: t.lowered_by_user } : {}) };
       save(g);
       console.log(`bar: overall ${judge}/10, every dimension ${floor}+, similarity stretch ${sim}%, mockup feel ${mock}/10`);
       break;
@@ -697,6 +866,61 @@ if (isMainRun) {
       if (!existsSync(resolve(root, src))) fail(`source folder not found: ${src}`);
       g.build = { src, url }; save(g);
       console.log(`build: ${src} at ${url}`);
+      break;
+    }
+    case 'set-pages': {
+      const g = load();
+      g.pages = parsePages(a1);
+      save(g);
+      console.log(`pages: ${g.pages.join(', ')}`);
+      break;
+    }
+    case 'set-checks': {
+      const g = load();
+      const cmds = optAll('--cmd').map((c) => c.trim()).filter(Boolean);
+      if (!cmds.length) fail('set-checks --cmd "npm test" [--cmd "npm run build"] (replaces the list)');
+      g.checks = cmds;
+      save(g);
+      console.log(`checks that must keep passing: ${cmds.join(' ; ')}`);
+      break;
+    }
+    case 'set-strategy': {
+      const g = load();
+      if (argv.includes('--rebuild')) {
+        const q = opt('--quote');
+        needUserWords(q);
+        g.strategy = 'rebuild'; g.strategy_quote = q;
+      } else if (argv.includes('--in-place')) {
+        g.strategy = 'in-place'; delete g.strategy_quote;
+      } else fail('set-strategy --in-place | --rebuild --quote "<user words>"');
+      save(g);
+      console.log(`strategy: ${g.strategy}`);
+      break;
+    }
+    case 'motion-allow': {
+      const g = load();
+      const file = a1, hash = argv[2];
+      if (!file || !hash || hash.startsWith('--')) fail('motion-allow <file> <hash> --reason "..." (the hash is in cook/baseline/motion.json)');
+      const reason = opt('--reason');
+      if (!reason || !reason.trim()) fail('motion-allow needs a --reason (why this existing motion is functional)');
+      const abs = resolve(root, file);
+      let text = null;
+      try { text = readFileSync(abs, 'utf8'); } catch { /* missing */ }
+      if (text === null) fail(`file not found: ${file}`);
+      const rel = relative(root, abs).split(sep).join('/');
+      const hits = motionHits(text, extname(abs).toLowerCase());
+      if (!hits.some((h) => h.hash === hash)) fail(`${rel} has no animation line with hash ${hash}. Hashes in this file: ${hits.map((h) => `${h.hash} (line ${h.line})`).join(', ') || 'none'}`);
+      g.motion_allow = [...(g.motion_allow || []).filter((a) => !(a.file === rel && a.hash === hash)), { file: rel, hash, reason: reason.trim() }];
+      save(g);
+      console.log(`allowed ${rel} line hash ${hash}: ${reason.trim()}`);
+      break;
+    }
+    case 'allow-dirty': {
+      const g = load();
+      const q = opt('--quote');
+      needUserWords(q);
+      g.dirty_quote = q; save(g);
+      console.log(`recorded: the baseline may be taken on a dirty tree: "${q}"`);
       break;
     }
     case 'set-motion': {
@@ -767,7 +991,7 @@ if (isMainRun) {
     }
     case 'elapsed': { const g = load(); console.log(`${hoursElapsed(g).toFixed(2)}h${g.time ? ` of ${g.time.mode} ${g.time.hours}h` : ' (timer not set)'}`); break; }
     default:
-      console.log('usage: gate.mjs init|status|check|verify|approve|override|reopen|set-bar|set-time|set-build|set-motion|score|calibrate|elapsed (see the header of this file)');
+      console.log('usage: gate.mjs init|status|check|verify|approve|override|reopen|set-bar|set-time|set-build|set-motion|set-pages|set-checks|set-strategy|motion-allow|allow-dirty|score|calibrate|elapsed (see the header of this file)');
       process.exit(cmd ? 2 : 0);
   }
 }

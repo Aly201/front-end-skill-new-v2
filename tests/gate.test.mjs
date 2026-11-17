@@ -3,11 +3,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, readFileSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, readFileSync, realpathSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
+import { lineHash } from '../skills/frontend-cook/scripts/_common.mjs';
 
 const SCRIPTS = resolve(import.meta.dirname, '..', 'skills', 'frontend-cook', 'scripts');
 const GATE = join(SCRIPTS, 'gate.mjs');
@@ -460,4 +461,205 @@ test('the mockup is a single file', () => {
   assert.match(runGate(d, ['verify', '2']).out, /PASS {2}mockup is a single file/);
   write(join(d, 'cook', 'mockup', 'style.css'), 'h1 { color: #111; }');
   assert.match(runGate(d, ['verify', '2']).out, /FAIL {2}the mockup must be a single file/);
+});
+
+// ---- redesign mode: an existing site, the baseline first (step 0b) ----
+const HIT_LINE = '@keyframes spin { to { transform: rotate(360deg); } }';
+const HIT_HASH = lineHash(HIT_LINE);
+const DIRS = ['/', '/pricing'];
+const slugOf = (p) => (p === '/' ? 'home' : p.slice(1));
+// A redesign project: a site folder with one animation line, init done, step 0 passed.
+function redesignProject() {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-redesign-')));
+  write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  write(join(d, 'site', 'index.html'), page('<h1>Rope for boats</h1><form><label>Email <input name="email"></label><button>Send</button></form>'));
+  write(join(d, 'site', 'app.css'), `${HIT_LINE}\nh1 { color: #111; }\n`);
+  assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'redesign', '--src', 'site', '--url', 'http://localhost:5173', '--pages', '/,/pricing']).code, 0);
+  return d;
+}
+// The baseline files the scripts write (baseline.mjs), for every page, except the named stills.
+function baselineCapture(d, skip = []) {
+  const B = (...p) => join(d, 'cook', 'baseline', ...p);
+  write(B('meta.json'), JSON.stringify({ commit: 'abc1234def', dirty: false, at: new Date().toISOString(), url: 'http://localhost:5173', pages: DIRS }));
+  const home = { title: 'Rope', meta_description: '', headings: [{ level: 1, text: 'Rope for boats' }], links: [], nav: [],
+    forms: [{ id: '', name: '', action: '', fields: [{ name: 'email', type: 'email', label: 'Email', required: true }], submit: 'Send' }],
+    buttons: ['Send'], images: [], ids: [], console_errors: [] };
+  const pricing = { title: 'Pricing', meta_description: '', headings: [{ level: 2, text: 'Plans' }], links: [], nav: [], forms: [], buttons: [], images: [], ids: [], console_errors: [] };
+  write(B('inventory.json'), JSON.stringify({ pages: { '/': home, '/pricing': pricing } }));
+  write(B('motion.json'), JSON.stringify([{ file: 'site/app.css', line: 1, text: HIT_LINE, hash: HIT_HASH }]));
+  write(B('checks.json'), '[]');
+  write(B('slop.json'), JSON.stringify({ ok: true, errors: 0 }));
+  for (const p of DIRS) write(B(`audit-${slugOf(p)}.json`), JSON.stringify({ ok: true, url: 'http://localhost:5173/', errors: 0 }));
+  for (const p of DIRS) for (const vp of ['desktop', 'mobile']) for (const fold of ['', '-fold']) {
+    const name = `${slugOf(p)}-${vp}${fold}.png`;
+    if (!skip.includes(name)) png(B('stills', name), vp === 'desktop' ? 1440 : 780, 900);
+  }
+}
+const KEEP = (motionRows = '', dropped = '- none', copy = '- none') =>
+  `## Keep\n- Contact form: "the contact form must still send"\n\n## Dropped\n${dropped}\n\n## Copy changes\n${copy}\n\n## Motion\n| file:line | hash | functional/decorative | keep/replace/remove |\n|---|---|---|---|\n${motionRows}\n`;
+const FORM_PROBE = (page) => [{ name: 'contact form submits', page, viewport: 'desktop',
+  steps: [{ fill: { label: 'Email', value: 'a@b.co' } }, { click: { role: 'button', name: 'Send' } }], expect: [{ text: 'Thanks' }] }];
+
+test('redesign: init needs --src and --url, status lists step 0b, a new project has no 0b', () => {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-init-')));
+  write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  write(join(d, 'site', 'index.html'), page('<h1>x</h1>'));
+  assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'redesign', '--src', 'site']).code, 2, 'needs --url');
+  assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'redesign', '--url', 'http://x']).code, 2, 'needs --src');
+  assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'redesign', '--src', 'nope', '--url', 'http://x']).code, 2, 'the src folder must exist');
+  assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'bogus']).code, 2);
+  assert.equal(existsSync(join(d, 'cook', 'GATES.json')), false, 'a refused init writes nothing');
+  assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'redesign', '--src', 'site', '--exclude', 'site/legacy/**', '--url', 'http://localhost:5173', '--pages', '/,/pricing']).code, 0);
+  const G = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  assert.equal(G.mode, 'redesign');
+  assert.deepEqual(G.scope, { src: ['site'], exclude: ['site/legacy/**'] });
+  assert.deepEqual(G.pages, ['/', '/pricing']);
+  assert.deepEqual(G.build, { src: 'site', url: 'http://localhost:5173' });
+  assert.match(runGate(d, ['status']).out, /^\s+0b\s+PENDING\s+Baseline: capture, keep list and probes$/m);
+
+  const n = newProject();
+  const G2 = JSON.parse(readFileSync(join(n, 'cook', 'GATES.json'), 'utf8'));
+  assert.deepEqual(G2.pages, ['/']);
+  assert.equal(G2.steps['0b'], undefined, 'a new project has no baseline step');
+  assert.doesNotMatch(runGate(n, ['status']).out, /^\s+0b\s/m);
+  assert.equal(runGate(n, ['init', '--project', 'X', '--src', 'site']).code, 2, '--src is for redesign mode');
+});
+
+test('redesign: step 0b refuses each missing piece of the baseline, then passes', () => {
+  const d = redesignProject();
+  const v = () => runGate(d, ['verify', '0b']);
+  const B = (...p) => join(d, 'cook', 'baseline', ...p);
+  // Step 1 waits for step 0b; step 0b itself may start.
+  const one = runGate(d, ['verify', '1']);
+  assert.equal(one.code, 1);
+  assert.match(one.out, /step 0b \(Baseline[^)]*\) is pending/);
+  assert.equal(runGate(d, ['check', '0b']).code, 0);
+
+  // A missing fold still.
+  baselineCapture(d, ['pricing-mobile-fold.png']);
+  let r = v();
+  assert.equal(r.code, 1);
+  assert.match(r.out, /baseline stills missing: .*pricing-mobile-fold\.png/);
+  png(B('stills', 'pricing-mobile-fold.png'), 780, 900);
+
+  // No KEEP.md yet; then a motion hit that is not classified; then a classified one.
+  assert.match(v().out, /cook\/baseline\/KEEP\.md missing/);
+  write(B('KEEP.md'), KEEP(''));
+  assert.match(v().out, /motion hits not classified in KEEP\.md/);
+  write(B('KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`));
+  assert.match(v().out, /PASS {2}every motion hit \(1\) is classified/);
+
+  // A form with no probe; a probe on the wrong page; then a probe on the form's page.
+  assert.match(v().out, /PASS {2}KEEP\.md has the four headings/);
+  assert.match(v().out, /probes\.json missing or not a JSON array/);
+  write(B('probes.json'), '[]');
+  assert.match(v().out, /0 probe\(s\) that fill or click, for 1 form\(s\)/);
+  write(B('probes.json'), JSON.stringify(FORM_PROBE('/pricing')));
+  assert.match(v().out, /no probe on \/ for its 1 form\(s\)/);
+  write(B('probes.json'), JSON.stringify(FORM_PROBE('/')));
+  assert.match(v().out, /PASS {2}a probe covers the form\(s\) on \//);
+
+  // No approval; words not typed are refused; then the approval counts.
+  assert.match(v().out, /user has not approved the baseline yet/);
+  assert.equal(runGate(d, ['approve', 'baseline', '--quote', 'approved the keep list and the stills']).code, 2, 'words not typed are refused');
+  say('approved the keep list and the stills', d);
+  assert.equal(runGate(d, ['approve', 'baseline', '--quote', 'approved the keep list and the stills']).code, 0);
+
+  // A dirty tree needs the user's words.
+  const meta = JSON.parse(readFileSync(B('meta.json'), 'utf8'));
+  write(B('meta.json'), JSON.stringify({ ...meta, dirty: true }));
+  assert.match(v().out, /dirty tree without the user's words/);
+  say('take the baseline on the dirty tree', d);
+  assert.equal(runGate(d, ['allow-dirty', '--quote', 'take the baseline on the dirty tree']).code, 0);
+
+  r = v();
+  assert.equal(r.code, 0, r.out);
+  const G = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  assert.equal(G.steps['0b'].status, 'passed');
+  assert.deepEqual(G.baseline, { commit: 'abc1234def', dirty: true, at: meta.at });
+  assert.equal(runGate(d, ['check', '1']).code, 0, 'step 1 may start after step 0b');
+
+  // Stills changed after the approval: it no longer counts.
+  later(B('stills', 'home-desktop.png'));
+  assert.match(v().out, /stills changed after the approval/);
+});
+
+test('redesign: motion-allow needs a real hash and a reason; set-strategy --rebuild and allow-dirty need the user words', () => {
+  const d = redesignProject();
+  const G = () => JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  assert.equal(runGate(d, ['motion-allow', 'site/app.css', '000000000000', '--reason', 'spinner']).code, 2, 'a hash not in the file is refused');
+  assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH]).code, 2, 'a reason is required');
+  assert.equal(runGate(d, ['motion-allow', 'site/missing.css', HIT_HASH, '--reason', 'x']).code, 2, 'the file must exist');
+  assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH, '--reason', 'loading spinner']).code, 0);
+  assert.deepEqual(G().motion_allow, [{ file: 'site/app.css', hash: HIT_HASH, reason: 'loading spinner' }]);
+
+  assert.equal(runGate(d, ['set-strategy', '--rebuild']).code, 2, 'rebuild needs the user words');
+  assert.equal(runGate(d, ['set-strategy', '--rebuild', '--quote', 'rewrite it from scratch']).code, 2, 'words not typed are refused');
+  say('rewrite it from scratch', d);
+  assert.equal(runGate(d, ['set-strategy', '--rebuild', '--quote', 'rewrite it from scratch']).code, 0);
+  assert.equal(G().strategy, 'rebuild');
+  assert.equal(G().strategy_quote, 'rewrite it from scratch');
+  assert.equal(runGate(d, ['set-strategy', '--in-place']).code, 0);
+  assert.equal(G().strategy, 'in-place');
+
+  assert.equal(runGate(d, ['allow-dirty', '--quote', 'take the dirty tree']).code, 2, 'allow-dirty needs words the user typed');
+
+  assert.equal(runGate(d, ['set-checks', '--cmd', 'npm test', '--cmd', 'npm run build']).code, 0);
+  assert.deepEqual(G().checks, ['npm test', 'npm run build']);
+  assert.equal(runGate(d, ['set-checks', '--cmd', 'npm run lint']).code, 0);
+  assert.deepEqual(G().checks, ['npm run lint'], 'set-checks replaces the list');
+  assert.equal(runGate(d, ['set-checks']).code, 2);
+
+  assert.equal(runGate(d, ['set-pages', '/,pricing']).code, 2, 'pages start with /');
+  assert.equal(runGate(d, ['set-pages', '/,/about']).code, 0);
+  assert.deepEqual(G().pages, ['/', '/about']);
+});
+
+test('redesign: calibrate re-bases from the baseline round to a later round', () => {
+  const d = redesignProject();
+  const offset = () => JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8')).calibration.offset;
+  judges('baseline', 9.0, d);                                  // raw 8.9
+  assert.equal(runGate(d, ['score', 'baseline']).code, 0);
+  say('I rate it 6 out of 10', d);
+  assert.equal(runGate(d, ['calibrate', '--user', '6', '--round', 'baseline', '--quote', 'I rate it 6 out of 10']).code, 0);
+  assert.equal(offset(), -2.9);
+  judges('r03', 9.5, d);                                       // raw 9.4
+  assert.equal(runGate(d, ['score', 'r03']).code, 0);
+  say('I rate it 9.5 out of 10', d);
+  assert.match(runGate(d, ['calibrate', '--user', '9.5', '--round', 'r03', '--quote', 'I rate it 9.5 out of 10']).out, /re-based on r03/);
+  assert.equal(offset(), 0);
+});
+
+test('redesign: verify 2 needs the old h1s and form fields in the mockup, and a three-way sheet', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  write(join(d, 'cook', 'baseline', 'KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`));
+  write(join(d, 'cook', 'mockup', 'index.html'), page('<h1>Something else</h1>'));
+  const v2 = () => runGate(d, ['verify', '2']).out;
+  assert.match(v2(), /FAIL {2}mockup does not cover the baseline.*Rope for boats/);
+  assert.match(v2(), /FAIL {2}no three-way sheet in cook\/compare\/mockup/);
+
+  // Present in the mockup: the h1 and the field name.
+  write(join(d, 'cook', 'mockup', 'index.html'), page('<h1>Rope for boats</h1><input name="email">'));
+  assert.match(v2(), /PASS {2}mockup covers the baseline: 2 h1 and form field name/);
+  png(join(d, 'cook', 'compare', 'mockup', 'three-way.png'), 1800, 900);
+  assert.match(v2(), /PASS {2}three-way sheet: three-way\.png/);
+
+  // Gone from the mockup but listed under Dropped and Copy changes: waived.
+  write(join(d, 'cook', 'mockup', 'index.html'), page('<h1>Something else</h1>'));
+  write(join(d, 'cook', 'baseline', 'KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`,
+    '- Hero headline "Rope for boats" is dropped: the user said "the new hero says it"',
+    '- Field "email" becomes "Work email": the user said "rename the email field"'));
+  assert.match(v2(), /PASS {2}mockup covers the baseline/);
+});
+
+test('redesign: set-bar stores the baseline rule, and verify 3 reports it once the baseline is scored', () => {
+  const d = redesignProject();
+  assert.equal(runGate(d, ['set-bar']).code, 0);
+  assert.equal(JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8')).target.delta, true);
+  write(join(d, 'cook', 'BRIEF.md'), 'Target: a rope maker\nBar: overall 9.2/10, every dimension 8.5+\n');
+  assert.match(runGate(d, ['verify', '3']).out, /FAIL {2}no dimension may end below the baseline: cook\/judge\/baseline\/summary\.json missing/);
+  judges('baseline', 9.0, d);
+  assert.equal(runGate(d, ['score', 'baseline']).code, 0);
+  assert.match(runGate(d, ['verify', '3']).out, /PASS {2}no dimension may end below the baseline \(baseline overall 8\.9/);
 });
