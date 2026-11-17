@@ -16,7 +16,7 @@
 //   --dark                 emulate prefers-color-scheme: dark
 import { mkdirSync, existsSync, statSync, renameSync, readdirSync, rmSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { loadPlaywright, launchBrowser, pageUrl, pageSlug } from './_common.mjs';
 import { runSteps } from './_steps.mjs';
@@ -56,16 +56,38 @@ function baseOf(t) {
   return href.endsWith('/') ? href : href + '/';
 }
 
-// A folder base needs its index.html for the '/' page (file:// does not serve folders).
-function pageTarget(base, page) {
+// A file: base has no server, so a page maps to a file: <p>/index.html, then <p>.html, then <p> itself.
+// Http(s) bases (and absolute page URLs) are used as they are.
+function resolvePage(base, page) {
   const u = pageUrl(base, page);
-  return u.startsWith('file:') && u.endsWith('/') ? u + 'index.html' : u;
+  if (!u.startsWith('file:')) return u;
+  const rel = String(page).replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+  const dir = fileURLToPath(base);
+  const cands = rel ? [join(dir, rel, 'index.html'), join(dir, `${rel}.html`), join(dir, rel)] : [join(dir, 'index.html')];
+  const found = cands.find((c) => existsSync(c) && statSync(c).isFile());
+  if (!found) throw new Error(`page ${page} not found under ${base}`);
+  return pathToFileURL(found).href;
 }
 
 const name = opt('--name', 'shot');
 const pagesOpt = opt('--pages');
 const pages = pagesOpt === null ? null : pagesOpt.split(',').map((s) => s.trim()).filter(Boolean);
 if (pages && pages.length === 0) { console.error('shoot: --pages needs at least one page, e.g. --pages /,/pricing'); process.exit(2); }
+// Two pages with the same slug would write over each other's files.
+if (pages) {
+  const bySlug = new Map();
+  for (const p of pages) bySlug.set(pageSlug(p), [...(bySlug.get(pageSlug(p)) || []), p]);
+  for (const [slug, same] of bySlug) {
+    if (same.length > 1) { console.error(`shoot: --pages ${same.join(' and ')} would write the same files (${slug}-<viewport>.png); keep one of them`); process.exit(2); }
+  }
+}
+// Resolve every page before anything is shot, so a missing file fails the run up front.
+let targets;
+try {
+  targets = pages
+    ? pages.map((p) => ({ page: p, url: resolvePage(baseOf(target), p) }))
+    : [{ page: null, url: toUrl(target) }];
+} catch (e) { console.error(`shoot: ${e.message}`); process.exit(1); }
 
 const hasSteps = argv.includes('--steps');
 const suffix = opt('--suffix');
@@ -96,8 +118,15 @@ function fileBase(page, vn) {
 
 const SETTLE_CSS = `*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;animation-iteration-count:1!important;transition-duration:0s!important;transition-delay:0s!important;caret-color:transparent!important;scroll-behavior:auto!important}`;
 
+// Opens a URL; an HTTP error status fails the run instead of shooting the error page.
+async function gotoPage(page, url) {
+  const res = await page.goto(url, { waitUntil: 'load', timeout: 45000 });
+  const status = res ? res.status() : 0;
+  if (status >= 400) throw new Error(`page ${url} returned ${status}`);
+}
+
 async function prepare(page, url) {
-  await page.goto(url, { waitUntil: 'load', timeout: 45000 });
+  await gotoPage(page, url);
   try { await page.waitForLoadState('networkidle', { timeout: 8000 }); } catch { /* busy pages */ }
   // Walk down the page so lazy images and scroll reveals fire, then go back up.
   await page.evaluate(async () => {
@@ -126,9 +155,6 @@ const pw = loadPlaywright();
 if (!pw) { console.error('shoot: Playwright not found. Run the setup check: node preflight.mjs'); process.exit(1); }
 const { browser } = await launchBrowser(pw);
 const written = [];
-const targets = pages
-  ? pages.map((p) => ({ page: p, url: pageTarget(baseOf(target), p) }))
-  : [{ page: null, url: toUrl(target) }];
 try {
   for (const t of targets) {
     for (const vn of vpNames) {
@@ -159,7 +185,7 @@ try {
         const vdir = join(out, `.video-${base}`);
         const vctx = await browser.newContext({ viewport: { width, height }, ...rest, recordVideo: { dir: vdir, size: { width, height } } });
         const vpage = await vctx.newPage();
-        await vpage.goto(t.url, { waitUntil: 'load', timeout: 45000 });
+        await gotoPage(vpage, t.url);
         await vpage.waitForTimeout(Math.min(2500, videoSecs * 200)); // let the intro play
         await applySteps(vpage, where);
         const total = await vpage.evaluate(() => document.documentElement.scrollHeight - window.innerHeight);
