@@ -3,13 +3,16 @@
 // preflight.mjs --install. It does nothing in projects without cook/GATES.json.
 //
 // PreToolUse (Write, Edit, MultiEdit, NotebookEdit, Bash, mcp__*):
-//   - blocks build code (frontend files outside cook/mockup/ and cook/refs/) until steps 2 to 5
-//     passed: mockup, bar, time and bans
-//   - blocks animation code in every frontend file except cook/refs/ until step 6a passed:
-//     static first
+//   - the project root for a file tool is the folder that holds cook/GATES.json above the file
+//     (rootForFile), so a sub-project works when the session starts in a monorepo root
+//   - blocks design files before step 5 (mockup, bar, time, bans): markup and style files in the
+//     redesign scope (or any frontend file when there is no scope). Logic files, tests, configs,
+//     server and api folders, cook/mockup and cook/refs stay free
+//   - blocks ADDED animation code in static stage (step 6a not passed, motion none, or cook/mockup).
+//     Existing motion lines may stay; motion_allow lists lines the user approved (functional motion)
 //   - blocks hand edits to files only the scripts write (GATES.json, PREFLIGHT.json, the ledger,
-//     judge summaries, reports), rewrites of a judge file that exists, and removing or moving
-//     judge files
+//     judge summaries, reports, baseline meta/inventory/motion/checks/slop/audit/stills, judge
+//     .abkey.json), rewrites of a judge file that exists, and removing or moving judge files
 //   - blocks agent-browser: this skill takes screenshots with shoot.mjs and checks with audit.mjs
 //   - logs every call to cook/.ledger.jsonl (time, session, agent, tool, file, command), which
 //     proves which session built and which one judged, and how long the work really took
@@ -19,34 +22,56 @@
 // Exit 2 blocks the tool call; the message on stderr goes to Claude.
 import { readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { join, resolve, relative, extname, isAbsolute } from 'node:path';
-import { projectRoot, readJson, STATE_DIR, MOTION_CODE, FRONTEND_EXT } from './_common.mjs';
+import { projectRoot, rootForFile, readJson, unallowedMotion, globToRe, STATE_DIR, FRONTEND_EXT } from './_common.mjs';
 
 const ORDER = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 const NAMES = { 0: 'setup', 1: 'references', 2: 'mockup', 3: 'bar', 4: 'time', 5: 'bans', '6a': 'static build', '6b': 'motion', 7: 'feedback', 8: 'separate judge' };
-const PROTECTED = [/^cook\/GATES\.json$/i, /^cook\/PREFLIGHT\.json$/i, /^cook\/\.ledger\.jsonl$/i, /^cook\/judge\/[^/]+\/summary\.json$/i, /^cook\/reports\/[^/]+\.json$/i];
+const PROTECTED = [
+  /^cook\/GATES\.json$/i, /^cook\/PREFLIGHT\.json$/i, /^cook\/\.ledger\.jsonl$/i,
+  /^cook\/judge\/[^/]+\/summary\.json$/i, /^cook\/reports\/[^/]+\.json$/i,
+  // written by baseline.mjs only (cook/baseline/KEEP.md and probes.json stay agent-editable)
+  /^cook\/baseline\/(meta|inventory|motion|checks|slop)\.json$/i,
+  /^cook\/baseline\/audit-[^/]*\.json$/i,
+  /^cook\/baseline\/stills\/.+$/i,
+  /^cook\/judge\/[^/]+\/\.abkey\.json$/i,
+];
 // A judge file is written once: a second Write or Edit to it is blocked. summary.json is the script's.
 const JUDGE_FILE = /^cook\/judge\/[^/]+\/(?!summary\.json$)[^/]+\.json$/i;
 // Bash segments that name a script-written file. Allowed only when they read it or a script runs.
-const PROTECTED_NAMES = /GATES\.json|PREFLIGHT\.json|\.ledger\.jsonl|summary\.json|cook[\\/](judge|reports)\b/i;
-const READ_OR_SCRIPT = /^(node\s+\S*(gate|preflight|slop_scan|audit|shoot)\.mjs\b|cat\b|head\b|tail\b|ls\b|grep\b|jq\b|wc\b|test\b|\[)/;
+const PROTECTED_NAMES = /GATES\.json|PREFLIGHT\.json|\.ledger\.jsonl|summary\.json|cook[\\/](judge|reports)\b|cook[\\/]baseline[\\/](meta|inventory|motion|checks|slop)\.json|cook[\\/]baseline[\\/]audit-|cook[\\/]baseline[\\/]stills\b|\.abkey\.json/i;
+const READ_OR_SCRIPT = /^(node\s+\S*(gate|preflight|slop_scan|audit|shoot|baseline|regress|pair)\.mjs\b|cat\b|head\b|tail\b|ls\b|grep\b|jq\b|wc\b|test\b|\[|diff\b|cmp\b)/;
 const AGENT_BROWSER = /\bagent-browser\b/i;
 const AGENT_BROWSER_TOOL = /agent[-_]browser/i;
 const AGENT_BROWSER_MSG = 'agent-browser is not used by this skill: take screenshots with shoot.mjs and check pages with audit.mjs.';
 const SKIP = /(^|\/)(node_modules|dist|build|\.next|\.astro|\.svelte-kit|\.git)\//;
+// Logic files are not design: they may be written before step 5.
+const LOGIC_EXT = ['.js', '.mjs', '.cjs', '.ts'];
+// Test, config, server and api files are not design, wherever they are.
+const NOT_DESIGN = [/(^|\/)[^/]*\.(test|spec)\.[^/]*$/i, /(^|\/)[^/]*\.config\.[^/]*$/i, /(^|\/)__tests__\//, /(^|\/)(server|api)\//];
 
 let input = {};
 try { input = JSON.parse(readFileSync(0, 'utf8') || '{}'); } catch { process.exit(0); }
 const cwd = input.cwd || process.cwd();
-const root = projectRoot(cwd);
+const tool = input.tool_name || '';
+const ti = input.tool_input || {};
+const fileArg = typeof ti.file_path === 'string' ? ti.file_path : (typeof ti.notebook_path === 'string' ? ti.notebook_path : '');
+const fileTool = Boolean(fileArg) && tool !== 'Bash' && !tool.startsWith('mcp__');
+const root = fileTool ? rootForFile(fileArg, cwd) : projectRoot(cwd);
 const gatesPath = join(root, STATE_DIR, 'GATES.json');
 if (!existsSync(gatesPath)) process.exit(0);
 const g = readJson(gatesPath, {});
 const passed = (s) => ['passed', 'overridden'].includes(g.steps?.[s]?.status);
 const block = (msg) => { process.stderr.write(`frontend-cook guard: ${msg}\n`); process.exit(2); };
-const log = (tool, file, extra = {}) => {
+const log = (toolName, file, extra = {}) => {
   try {
-    appendFileSync(join(root, STATE_DIR, '.ledger.jsonl'), JSON.stringify({ at: new Date().toISOString(), session_id: input.session_id || null, tool, file, agent: input.agent_id || null, ...extra }) + '\n');
+    appendFileSync(join(root, STATE_DIR, '.ledger.jsonl'), JSON.stringify({ at: new Date().toISOString(), session_id: input.session_id || null, tool: toolName, file, agent: input.agent_id || null, ...extra }) + '\n');
   } catch { /* never block on logging */ }
+};
+
+// `cp` whose last argument is outside cook/: it only reads its sources.
+const cpReadsOut = (seg) => {
+  const args = seg.split(/\s+/).slice(1).filter((a) => a && !a.startsWith('-'));
+  return args.length >= 2 && !/(^|[\\/])cook([\\/]|$)/i.test(args[args.length - 1]);
 };
 
 // The reason a Bash command must not run, or null. Checked per segment, so a write hidden
@@ -56,11 +81,61 @@ function bashProblem(cmd) {
   for (const seg of segs) {
     if (/^(rm|mv)\b/.test(seg) && /cook[\\/]judge\b/i.test(seg)) return 'judge files are written once: they are never removed or moved.';
     if (/^touch\b/.test(seg) && /cook[\\/]/i.test(seg)) return 'files under cook/ are dated by the scripts: do not touch them.';
-    if (PROTECTED_NAMES.test(seg) && (seg.includes('>') || !READ_OR_SCRIPT.test(seg))) {
-      return 'cook/GATES.json, PREFLIGHT.json, the ledger, judge summaries and reports are written only by the scripts (gate.mjs, preflight.mjs, slop_scan.mjs, audit.mjs).';
+    if (PROTECTED_NAMES.test(seg)) {
+      const readOnly = !seg.includes('>') && (READ_OR_SCRIPT.test(seg) || (/^cp\s/.test(seg) && cpReadsOut(seg)));
+      if (!readOnly) {
+        return 'cook/GATES.json, PREFLIGHT.json, the ledger, judge summaries, reports and baseline files are written only by the scripts (gate.mjs, preflight.mjs, baseline.mjs, slop_scan.mjs, audit.mjs, shoot.mjs, regress.mjs, pair.mjs).';
+      }
     }
   }
   return null;
+}
+
+// Design files before step 5: markup and style in the redesign scope (or any frontend file when
+// there is no scope). cook/mockup and cook/refs are free.
+const SCOPE_SRC = (Array.isArray(g.scope?.src) ? g.scope.src : [])
+  .map((s) => String(s).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean);
+const SCOPE_EXCLUDE = (Array.isArray(g.scope?.exclude) ? g.scope.exclude : []).map((x) => globToRe(x));
+function isDesignFile(rel, ext) {
+  if (rel.startsWith('cook/mockup/') || rel.startsWith('cook/refs/')) return false;
+  if (!FRONTEND_EXT.includes(ext) || SKIP.test(rel)) return false;
+  if (LOGIC_EXT.includes(ext) || NOT_DESIGN.some((re) => re.test(rel))) return false;
+  if (SCOPE_EXCLUDE.some((re) => re.test(rel))) return false;
+  if (SCOPE_SRC.length) return SCOPE_SRC.some((s) => rel === s || rel.startsWith(`${s}/`));
+  return true;
+}
+
+// Motion lines the edit adds: unallowed hits in the new text that are not in the old text,
+// counted per hash. Edit compares old_string with new_string, MultiEdit all edits combined,
+// Write the new content with the file on disk, NotebookEdit new_source with nothing.
+function addedMotion(abs, rel, ext) {
+  const allow = Array.isArray(g.motion_allow) ? g.motion_allow : [];
+  let before = '';
+  let after = '';
+  if (tool === 'Edit') {
+    before = ti.old_string || '';
+    after = ti.new_string || '';
+  } else if (tool === 'MultiEdit') {
+    const edits = Array.isArray(ti.edits) ? ti.edits : [];
+    before = edits.map((e) => e.old_string || '').join('\n');
+    after = edits.map((e) => e.new_string || '').join('\n');
+  } else if (tool === 'Write') {
+    after = typeof ti.content === 'string' ? ti.content : '';
+    try { before = readFileSync(abs, 'utf8'); } catch { before = ''; }
+  } else if (tool === 'NotebookEdit') {
+    after = typeof ti.new_source === 'string' ? ti.new_source : '';
+  } else {
+    after = [ti.content, ti.new_string, ti.new_source, ...(Array.isArray(ti.edits) ? ti.edits.map((e) => e.new_string) : [])]
+      .filter((x) => typeof x === 'string').join('\n');
+  }
+  const seen = new Map();
+  for (const h of unallowedMotion(before, ext, rel, allow)) seen.set(h.hash, (seen.get(h.hash) || 0) + 1);
+  const added = [];
+  for (const h of unallowedMotion(after, ext, rel, allow)) {
+    const n = seen.get(h.hash) || 0;
+    if (n > 0) seen.set(h.hash, n - 1); else added.push(h);
+  }
+  return added;
 }
 
 if (input.hook_event_name === 'UserPromptSubmit') {
@@ -71,9 +146,6 @@ if (input.hook_event_name === 'UserPromptSubmit') {
     : '[frontend-cook] All steps passed.');
   process.exit(0);
 }
-
-const tool = input.tool_name || '';
-const ti = input.tool_input || {};
 
 if (AGENT_BROWSER_TOOL.test(tool)) block(AGENT_BROWSER_MSG);
 if (tool.startsWith('mcp__')) {
@@ -90,7 +162,6 @@ if (tool === 'Bash') {
   process.exit(0);
 }
 
-const fileArg = ti.file_path || ti.notebook_path;
 if (!fileArg) process.exit(0);
 const abs = isAbsolute(fileArg) ? fileArg : resolve(cwd, fileArg);
 const rel = relative(root, abs).split('\\').join('/');
@@ -108,18 +179,22 @@ const isFrontend = FRONTEND_EXT.includes(ext) && !SKIP.test(rel);
 const inMockup = rel.startsWith('cook/mockup/');
 const inRefs = rel.startsWith('cook/refs/');
 
-if (isFrontend && !inMockup && !inRefs && !passed('5')) {
+if (!passed('5') && isDesignFile(rel, ext)) {
   block(`steps 2 to 5 (mockup, bar, time, bans) must pass before build code. (${rel})`);
 }
 
-if (isFrontend && !inRefs) {
-  const text = [ti.content, ti.new_string, ti.new_source, ...(Array.isArray(ti.edits) ? ti.edits.map((e) => e.new_string) : [])].filter((x) => typeof x === 'string').join('\n');
+if ((isFrontend || tool === 'NotebookEdit') && !inRefs) {
   const staticStage = inMockup || !passed('6a') || g.motion === 'none';
-  const hit = text.match(MOTION_CODE);
-  if (staticStage && hit) {
-    block(g.motion === 'none'
-      ? `the user chose no motion ("${g.motion_quote}"). "${hit[0]}" is animation code. (${rel})`
-      : `static first: animation code ("${hit[0]}") waits until step 6a passed and the user approved the static design. Hover and focus transitions are fine. (${rel})`);
+  if (staticStage) {
+    const added = addedMotion(abs, rel, ext);
+    if (added.length) {
+      const first = added[0];
+      const how = `For functional motion (spinners, lazy loading), ask the user, then run gate.mjs motion-allow ${rel} ${first.hash} --reason "..." .`;
+      if (g.motion === 'none') {
+        block(`the user chose no motion ("${g.motion_quote}"). "${first.text}" is animation code. ${how} (${rel})`);
+      }
+      block(`static first: this change adds animation code ("${first.text}") before step 6a passed. Hover and focus transitions are fine, and existing motion may stay. ${how} (${rel})`);
+    }
   }
 }
 
