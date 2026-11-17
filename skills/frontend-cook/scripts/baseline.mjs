@@ -9,7 +9,7 @@ import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync, rmSync,
 import { join, resolve, relative, extname, dirname, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { projectRoot, readGates, loadPlaywright, launchBrowser, pageUrl, pageSlug, walk, motionHits, FRONTEND_EXT, STATE_DIR } from './_common.mjs';
+import { projectRoot, readGates, loadPlaywright, launchBrowser, pageUrl, pageSlug, walk, motionHits, globToRe, FRONTEND_EXT, STATE_DIR } from './_common.mjs';
 import { inventoryOfUrl } from './_inventory.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -99,9 +99,12 @@ for (const s of scope) {
   if (statSync(abs).isDirectory()) files.push(...walk(abs, FRONTEND_EXT));
   else if (FRONTEND_EXT.includes(extname(abs).toLowerCase())) files.push(abs);
 }
+// Excluded (legacy) files are not redesigned, so their motion is not recorded or classified.
+const excludeRes = (Array.isArray(gates.scope?.exclude) ? gates.scope.exclude : []).map((x) => globToRe(x));
 const motion = [];
 for (const f of files) {
   const rel = relative(root, f).split(sep).join('/');
+  if (excludeRes.some((re) => re.test(rel))) continue;
   for (const h of motionHits(readFileSync(f, 'utf8'), extname(f))) {
     motion.push({ file: rel, line: h.line, text: h.text, hash: h.hash });
   }
