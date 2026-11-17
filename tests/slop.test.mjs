@@ -4,6 +4,7 @@ import { resolve, join } from 'node:path';
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { scan, isBeige, isPurple, isPurpleGrad, colorsIn } from '../skills/frontend-cook/scripts/slop_scan.mjs';
 
 const fx = (n) => resolve(import.meta.dirname, 'fixtures', n);
@@ -351,4 +352,22 @@ test('--exclude with a plain folder, a trailing slash or ./ marks findings out o
   const now = JSON.parse(readFileSync(join(proj, 'rep', 'plain-now.json'), 'utf8'));
   assert.deepEqual(now.exclude, ['src/legacy']);
   assert.equal(now.findings.find((f) => f.id === 'beige').in_scope, false);
+});
+
+test('the report records bans_sha1: the sha1 of the bans file it used, null with no bans file, and it changes with the bans', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bansha-'));
+  const bans = join(dir, 'bans.json');
+  writeFileSync(bans, JSON.stringify({ allowed: [], extra: [] }));
+  const sha = (p) => createHash('sha1').update(readFileSync(p)).digest('hex');
+  assert.equal(scan([fx('clean')], bans).bans_sha1, sha(bans));
+  assert.equal(scan([fx('clean')], null).bans_sha1, null, 'no bans file: null');
+  assert.equal(scan([fx('clean')], join(dir, 'missing.json')).bans_sha1, null, 'a missing bans file: null');
+  const before = scan([fx('clean')], bans).bans_sha1;
+  writeFileSync(bans, JSON.stringify({ allowed: [], extra: [{ id: 'no-x', pattern: 'zz' }] }));
+  assert.notEqual(scan([fx('clean')], bans).bans_sha1, before, 'a changed bans file has another sha1');
+  assert.equal(scan([fx('clean')], bans).bans_sha1, sha(bans));
+  // The CLI writes the same value into --out.
+  const out = join(dir, 'report.json');
+  spawnSync(process.execPath, [CLI, fx('clean'), '--bans', bans, '--out', out], { cwd: dir, encoding: 'utf8' });
+  assert.equal(JSON.parse(readFileSync(out, 'utf8')).bans_sha1, sha(bans));
 });

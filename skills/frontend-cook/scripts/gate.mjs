@@ -42,7 +42,8 @@ import { join, resolve, extname, basename, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, unallowedMotion, pageSlug, pageUrl, normUrl, isDesignFile, globToRe, lineHash } from './_common.mjs';
+import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, unallowedMotion, pageSlug, pageUrl, normUrl, isDesignFile, isExcluded, lineHash } from './_common.mjs';
+import { isWaivedBy } from './_inventory.mjs';
 
 export const STEPS = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 // An existing site (mode redesign) starts with the baseline, step 0b.
@@ -96,6 +97,8 @@ function parsePages(v) {
   return list;
 }
 function readText(p) { try { return readFileSync(p, 'utf8'); } catch { return ''; } }
+// sha1 of a file's bytes (hex), or null when the file is missing.
+function sha1File(p) { try { return createHash('sha1').update(readFileSync(p)).digest('hex'); } catch { return null; } }
 // The lines under one "## <name>" heading of a markdown file (up to the next heading of level 1 to 3).
 function sectionOf(md, name) {
   const out = [];
@@ -129,15 +132,17 @@ function srcFiles(g) {
 }
 // Pages that need evidence: GATES.pages, default ['/'].
 const pagesOf = (g) => (g.pages?.length ? g.pages : ['/']);
-// Source files the build is judged on. Redesign: every scope folder, with the excluded globs left out
+// Source files the build is judged on. Redesign: every scope folder, with the excluded folders and globs left out
 // (legacy code is not restyled, so its motion is not the build's). Mode new: the build folder.
 function designSrcFiles(g) {
   if (g.mode !== 'redesign') return srcFiles(g);
   const dirs = g.scope?.src?.length ? g.scope.src : [g.build?.src].filter(Boolean);
-  const excl = (g.scope?.exclude || []).map((x) => globToRe(x));
   return dirs.flatMap((d) => walk(resolve(root, d), SRC_EXT))
-    .filter((f) => !excl.some((re) => re.test(relative(root, f).split(sep).join('/'))));
+    .filter((f) => !isExcluded(relative(root, f).split(sep).join('/'), g.scope?.exclude));
 }
+// The scope folders and exclude globs a redesign slop report must have been run with.
+const scopeDirs = (g) => (g.scope?.src || []).map((x) => resolve(root, x));
+const scopeExcludes = (g) => (g.scope?.exclude || []).map(normGlob);
 function mockupFiles() { return walk(S('mockup'), SRC_EXT); }
 function images(dir) { try { return readdirSync(dir).filter((f) => IMG.includes(extname(f).toLowerCase())).map((f) => join(dir, f)); } catch { return []; } }
 function rounds() {
@@ -169,7 +174,8 @@ function nonEmpty(p) {
 }
 // A side-by-side must be at least as new as the newest source file it compares.
 function compareCheck(dir, newest, okMsg, missingMsg) {
-  const cmp = (() => { try { return readdirSync(dir).filter((f) => /\.(jpe?g|png)$/i.test(f)).map((f) => join(dir, f)); } catch { return []; } })();
+  // The A/B pairs (ab-N.jpg, made by pair.mjs) are not the side-by-side with the references: they never count here.
+  const cmp = (() => { try { return readdirSync(dir).filter((f) => /\.(jpe?g|png)$/i.test(f) && !/^ab-\d+\.jpg$/i.test(f)).map((f) => join(dir, f)); } catch { return []; } })();
   if (!cmp.length) return [false, missingMsg];
   if (newestMtime(cmp) < newest) return [false, 'side-by-side is older than the latest source change: rebuild it from the new stills'];
   return [true, okMsg];
@@ -225,6 +231,16 @@ const C = {
     if (expect.exclude) {
       const missing = expect.exclude.filter((x) => !(r.exclude || []).includes(x));
       if (missing.length) return [false, `${label}: run slop_scan.mjs with --exclude ${missing.join(' --exclude ')}`];
+    }
+    if (expect.bansSha1) {
+      // The report must have been made with the bans file as it is now (or with none, when there is none).
+      if (!('bans_sha1' in r) || r.bans_sha1 !== sha1File(S('bans.json'))) {
+        return [false, `${label}: the report was made with other bans than cook/bans.json (or before bans_sha1 was recorded): run slop_scan.mjs again`];
+      }
+    }
+    if (expect.anyOk) {
+      // Recorded, not judged: the design has not started, so the old site's findings do not fail this step.
+      return [true, `${label}: recorded against the baseline with the excludes (${r.errors} error(s), ${(r.new || []).length} new since the baseline; in-scope errors must be zero from the first round on)`];
     }
     if (expect.url !== undefined && normUrl(r.url) !== normUrl(expect.url)) {
       return [false, `${label}: the audit ran on ${r.url || 'nothing'}, not the build (${expect.url ?? 'no build URL set'})`];
@@ -415,28 +431,46 @@ function baselineChecks(g) {
   return out;
 }
 
-// Redesign, verify 2: every h1 and form field of the old site is in the mockup, or waived under Dropped / Copy changes.
-function redesignMockupChecks() {
+// Redesign, verify 2: the mockup covers the pages named on its "Mockup covers:" line of BRIEF.md (default: the first
+// page). For each covered page, its h1s, nav texts and form fields (a field passes when its label or its name is in
+// the mockup) must be in cook/mockup/index.html, or waived by a Dropped or Copy changes line of KEEP.md.
+function redesignMockupChecks(g) {
   const out = [];
   const inv = readJson(S('baseline', 'inventory.json'));
   if (!inv?.pages) return [[false, 'baseline inventory missing: nothing to check the mockup against (verify 0b first)']];
   const html = readText(S('mockup', 'index.html')).toLowerCase();
   const keep = readText(S('baseline', 'KEEP.md'));
-  const waived = `${sectionOf(keep, 'Dropped')}\n${sectionOf(keep, 'Copy changes')}`.toLowerCase();
+  const waivedLines = [...sectionOf(keep, 'Dropped').split('\n'), ...sectionOf(keep, 'Copy changes').split('\n')].filter((l) => l.trim());
+  const covers = briefLine('Mockup covers');
+  const want = covers === null ? [pagesOf(g)[0]] : covers.split(',').map((x) => x.trim()).filter(Boolean);
+  const unknown = want.filter((p) => !inv.pages[p]);
+  const known = want.filter((p) => inv.pages[p]);
+  if (unknown.length) out.push([false, `"Mockup covers" names ${unknown.join(', ')}, which the baseline inventory does not have`]);
   const missing = [];
   let terms = 0;
-  for (const [page, p] of Object.entries(inv.pages)) {
-    const names = [
-      ...(p?.headings || []).filter((h) => h.level === 1).map((h) => h.text),
-      ...(p?.forms || []).flatMap((f) => (f.fields || []).map((x) => x.name)),
-    ].map((t) => String(t ?? '').trim()).filter(Boolean);
-    for (const t of new Set(names)) {
+  const here = (t) => t && html.includes(String(t).trim().toLowerCase());
+  for (const page of known) {
+    const p = inv.pages[page];
+    const seen = new Set();
+    const term = (text, kind) => {
+      const t = String(text ?? '').trim();
+      if (!t || seen.has(`${kind}:${t.toLowerCase()}`)) return;
+      seen.add(`${kind}:${t.toLowerCase()}`);
       terms++;
-      const k = t.toLowerCase();
-      if (!html.includes(k) && !waived.includes(k)) missing.push(`"${t}" (${page})`);
+      if (!here(t) && !isWaivedBy(waivedLines, t, kind)) missing.push(`"${t}" (${page})`);
+    };
+    for (const h of (p?.headings || []).filter((x) => x.level === 1)) term(h.text, 'text');
+    for (const n of (p?.nav || [])) term(n, 'text');
+    for (const f of (p?.forms || []).flatMap((x) => x.fields || [])) {
+      const label = String(f.label ?? '').trim(), name = String(f.name ?? '').trim();
+      if (!label && !name) continue;
+      if (here(label) || here(name)) { terms++; continue; }
+      terms++;
+      const waived = [label, name].some((x) => x && isWaivedBy(waivedLines, x, 'field'));
+      if (!waived) missing.push(`"${label || name}" (${page})`);
     }
   }
-  out.push(missing.length === 0 ? [true, `mockup covers the baseline: ${terms} h1 and form field name(s) found in cook/mockup or waived in KEEP.md`]
+  out.push(missing.length === 0 ? [true, `mockup covers the baseline on ${known.join(', ')}: ${terms} h1, nav and form field(s) found in cook/mockup or waived in KEEP.md`]
     : [false, `mockup does not cover the baseline: missing ${missing.slice(0, 12).join(', ')}${missing.length > 12 ? ` and ${missing.length - 12} more` : ''}. Keep them, or list them under Dropped / Copy changes in KEEP.md`]);
   const three = images(S('compare', 'mockup')).filter((f) => /three|3way/i.test(basename(f)));
   out.push(three.length ? [true, `three-way sheet: ${basename(three[0])} (old site, mockup, closest reference)`]
@@ -529,7 +563,7 @@ function doneChecks(g, step) {
       out.push(C.reportOk('slop-mockup.json', newest, 'slop scan of the mockup', { target: resolve(S('mockup')) }));
       const anim = motionCodeIn(files, g);
       out.push([anim.length === 0, anim.length ? `animation code in the mockup (it must be static): ${anim.join(', ')}` : 'mockup is static']);
-      if (g.mode === 'redesign') out.push(...redesignMockupChecks());
+      if (g.mode === 'redesign') out.push(...redesignMockupChecks(g));
       out.push(...judgeChecks(g, 'mockup', 'mockup', newest));
       out.push(C.approval(g, 'mockup'));
       break;
@@ -569,8 +603,8 @@ function doneChecks(g, step) {
       out.push([bad.length === 0, bad.length ? `bans switched off without the user's own words (typed in this project): ${bad.map((a) => a.id).join(', ')}` : 'every switched-off ban has the user\'s words']);
       out.push([briefLine('Bans') !== null, 'BRIEF.md has a "Bans:" line']);
       if (g.mode === 'redesign') {
-        // The step 5 scan: every scope folder, against the baseline, excluded code included (only new findings fail).
-        out.push(slopCheck(g, 'slop-step5.json', 0, 'slop scan of the source folders (step 5)'));
+        // The step 5 record: every scope folder, against the baseline, with the bans as they are now.
+        out.push(step5SlopCheck(g));
         out.push(designGitCheck(g));
       }
       break;
@@ -709,13 +743,68 @@ function motionCodeIn(files, g = {}) {
 // Slop report check. Redesign: the report scanned every scope folder, ran with the baseline and with
 // every exclude glob (so only new findings in excluded code fail). Mode new: the build folder.
 const normGlob = (x) => String(x).replace(/\\/g, '/').replace(/^\.\//, '');
+// Rounds (6a, 6b, 8): the scan is measured from the step 5 record, so only findings that appeared after step 5
+// are new; in-scope errors must be zero.
 function slopCheck(g, name, than, label) {
   if (g.mode !== 'redesign') return C.reportOk(name, than, label, { target: g.build?.src ? resolve(root, g.build.src) : null });
-  return C.reportOk(name, than, label, {
-    targets: (g.scope?.src || []).map((x) => resolve(root, x)),
-    baseline: 'cook/baseline/slop.json',
-    exclude: (g.scope?.exclude || []).map(normGlob),
+  return C.reportOk(name, than, label, { targets: scopeDirs(g), baseline: 'cook/reports/slop-step5.json', exclude: scopeExcludes(g) });
+}
+// Step 5 (redesign): records the scan of every scope folder against the old site's slop, with the excludes and
+// the bans in cook/bans.json as they are now. It does not need to be clean: the design has not started yet.
+function step5SlopCheck(g) {
+  return C.reportOk('slop-step5.json', 0, 'slop scan of the source folders (step 5)', {
+    targets: scopeDirs(g), baseline: 'cook/baseline/slop.json', exclude: scopeExcludes(g), bansSha1: true, anyOk: true,
   });
+}
+
+// Redesign: every non-empty Dropped and Copy changes line quotes words the user typed (8+ characters, in quotes).
+// One broad quote may serve several lines. A line that is only "none" is no entry.
+function quotesUserWords(line) {
+  return [...line.matchAll(/"([^"]+)"|“([^”]+)”/g)].some((m) => { const q = (m[1] ?? m[2]).trim(); return quoteOk(q) && userSaid(root, q); });
+}
+function keepWordsCheck() {
+  const keep = readText(S('baseline', 'KEEP.md'));
+  const lines = [...sectionOf(keep, 'Dropped').split('\n'), ...sectionOf(keep, 'Copy changes').split('\n')]
+    .map((l) => l.trim()).filter((l) => /^[-*]\s+\S/.test(l) && !/^[-*]\s+none\.?$/i.test(l));
+  const unsaid = lines.filter((l) => !quotesUserWords(l));
+  return unsaid.length === 0
+    ? [true, `every Dropped and Copy changes line (${lines.length}) quotes the user's own words`]
+    : [false, `Dropped and Copy changes lines need the user's exact words in "..." (8+ characters, typed in this project): ${unsaid.slice(0, 3).map((l) => l.slice(0, 70)).join(' / ')}`];
+}
+// The probes as step 0b approved them, kept in g.baseline.probes: name, page, viewport, expect, and the request kinds
+// (request_nav, from probecheck.json: whether each request was a full-page navigation).
+function probeSnapshot() {
+  const probes = readJson(S('baseline', 'probes.json'));
+  const rows = readJson(S('baseline', 'probecheck.json'));
+  if (!Array.isArray(probes)) return [];
+  return probes.map((p, i) => {
+    const name = p?.name || `probe ${i + 1}`;
+    const row = Array.isArray(rows) ? rows.find((r) => r?.name === name) : null;
+    return { name, page: p?.page ?? null, viewport: p?.viewport ?? null, expect: Array.isArray(p?.expect) ? p.expect : [], request_nav: row?.request_nav ?? null };
+  });
+}
+// Redesign rounds: no probe approved at 0b may have been removed, moved, given other request expectations, or weakened
+// (fewer expectations). Steps and selectors may change: a relabelled field is a real change.
+function probeSnapshotChecks(g) {
+  const snap = g.baseline?.probes;
+  if (!Array.isArray(snap)) return [[false, 'no probe snapshot from step 0b: verify 0b again (it records the probes the user approved)']];
+  const probes = readJson(S('baseline', 'probes.json'));
+  const now = new Map((Array.isArray(probes) ? probes : []).map((p, i) => [p?.name || `probe ${i + 1}`, p]));
+  const requests = (list) => (Array.isArray(list) ? list : []).filter((e) => e && typeof e.request === 'string').map((e) => e.request);
+  const out = [];
+  for (const s of snap) {
+    const p = now.get(s.name);
+    if (!p) { out.push([false, `probe "${s.name}" was removed since step 0b: restore it (cook/baseline/probes.json), or reopen 0b to re-approve the baseline`]); continue; }
+    const problems = [];
+    if (p.page !== s.page || p.viewport !== s.viewport) problems.push(`it was ${s.page} ${s.viewport} at step 0b, now ${p.page} ${p.viewport}`);
+    if (JSON.stringify(requests(p.expect)) !== JSON.stringify(requests(s.expect))) problems.push('its request expectations changed');
+    const had = (s.expect || []).length, has = Array.isArray(p.expect) ? p.expect.length : 0;
+    if (has < had) problems.push(`it has ${has} expectation(s), it had ${had} at step 0b`);
+    out.push(problems.length
+      ? [false, `probe "${s.name}" weakened since step 0b: ${problems.join('; ')}. Restore the expectations, or reopen 0b to re-approve the baseline`]
+      : [true, `probe "${s.name}" is as the user approved it at step 0b (page, viewport, request expectations, ${had} expectation(s))`]);
+  }
+  return out;
 }
 
 // The proof a round needs, newer than the newest source file. Mode new with the one default page keeps
@@ -743,8 +832,15 @@ function roundEvidence(g, r, newest, needVideo) {
   out.push(compareCheck(S('compare', r), newest, `${r} side-by-side exists`, `${r} side-by-side missing (cook/compare/${r}/)`));
   out.push(slopCheck(g, `slop-${r}.json`, newest, `${r} slop scan`));
   if (g.mode === 'redesign') {
-    // Regression proof for the round: regress.mjs must have run on this build and passed.
+    out.push(keepWordsCheck());
+    out.push(...probeSnapshotChecks(g));
+    // Regression proof for the round: regress.mjs must have run on this build and passed, on the probes as they are now.
     out.push(C.reportOk(`regress-${r}.json`, newest, `${r} regress`));
+    const reg = report(`regress-${r}.json`);
+    const probesNow = sha1File(S('baseline', 'probes.json'));
+    out.push(reg && 'probes_sha1' in reg && reg.probes_sha1 === probesNow
+      ? [true, `${r} regress ran on the current probes.json`]
+      : [false, `${r} regress was not run on the current probes.json (probes_sha1 ${reg && 'probes_sha1' in reg ? reg.probes_sha1 : 'missing'}, probes.json ${probesNow ?? 'missing'}): run regress again`]);
     const base = buildUrl(g);
     for (const page of pages) {
       out.push(C.reportOk(`audit-${r}-${pageSlug(page)}.json`, newest, `${r} ${page} audit`, { url: base ? pageUrl(base, page) : null }));
@@ -776,8 +872,10 @@ function designGitCheck(g) {
     if (!known) return false;
     try { return createHash('sha1').update(readFileSync(resolve(root, x))).digest('hex') === known; } catch { return false; }
   };
-  const ignored = changed.filter((x) => isDesignFile(x, g) && preDirty(x));
-  const design = changed.filter((x) => isDesignFile(x, g) && !ignored.includes(x));
+  // The file text is passed so that JSX in a .js file counts as design (isDesignFile reads the text of logic files).
+  const designNow = (x) => isDesignFile(x, g, readText(resolve(root, x)));
+  const ignored = changed.filter((x) => designNow(x) && preDirty(x));
+  const design = changed.filter((x) => designNow(x) && !ignored.includes(x));
   const why = ignored.length
     ? `${ignored.length} already dirty at the baseline and unchanged since, the rest not design`
     : 'none of them design';
@@ -808,12 +906,31 @@ function decorativeCheck(g) {
     : [false, `decorative motion still in the code (remove it in this round, redesign it in 6b): ${hits.slice(0, 5).join('; ')}`];
 }
 
-// Verify 8 (redesign): old against new. Every judge file in the round names the new side of every pair in
-// .abkey.json, and no calibrated dimension of the round ends below the baseline's.
+// Verify 8 (redesign): old against new. The A/B key covers every baseline page in g.pages on desktop and mobile; every
+// judge file names the new side of every pair in .abkey.json; the key and the pairs (ab-N.jpg) are newer than the
+// round's fold stills and the newest source; and no raw dimension of the round ends below the baseline's raw score.
+// Raw means the judges' medians before the calibration offset: the offset is applied to both sides alike.
 function abChecks(g, r) {
   const key = readJson(S('judge', r, '.abkey.json'));
   if (!Array.isArray(key) || key.length === 0) return [[false, `no A/B key for ${r}: run pair.mjs --round ${r}`]];
   const out = [];
+  const inv = readJson(S('baseline', 'inventory.json'));
+  const basePages = pagesOf(g).filter((p) => inv?.pages?.[p]);
+  const uncovered = [];
+  for (const p of basePages) for (const vp of VIEWPORTS) if (!key.some((k) => k && k.page === p && k.viewport === vp)) uncovered.push(`${p} ${vp}`);
+  out.push(uncovered.length === 0 ? [true, `A/B key covers every baseline page on desktop and mobile (${basePages.length} page(s))`]
+    : [false, `A/B key has no pair for ${uncovered.join(', ')}: run pair.mjs --round ${r} (it needs the fold stills of every baseline page)`]);
+  // Freshness: the key and every pair must be at least as new as the newest fold still of the round and the newest source.
+  const folds = (() => { try { return readdirSync(S('stills', r)).filter((f) => f.endsWith('-fold.png')).map((f) => S('stills', r, f)); } catch { return []; } })();
+  const newest = Math.max(newestMtime(folds), newestMtime(designSrcFiles(g)));
+  const keyPath = S('judge', r, '.abkey.json');
+  const pairPaths = key.map((k) => S('compare', r, `${k.pair}.jpg`));
+  const missingPairs = pairPaths.filter((f) => !existsSync(f)).map((f) => basename(f));
+  out.push(missingPairs.length === 0 ? [true, `every A/B pair (${key.length}) has its side-by-side image`]
+    : [false, `A/B side-by-side missing: ${missingPairs.join(', ')} (cook/compare/${r}/): run pair.mjs --round ${r}`]);
+  const stale = [keyPath, ...pairPaths.filter(existsSync)].filter((f) => mtime(f) < newest).map((f) => basename(f));
+  out.push(stale.length === 0 ? [true, `the A/B key and pairs are newer than the round's fold stills and the latest source`]
+    : [false, `${stale.join(', ')} older than the round's fold stills or the latest source change: run pair.mjs --round ${r} again`]);
   const files = judgeFilesIn(r);
   if (!files.length) out.push([false, `no judge files in ${r} to check the A/B choices`]);
   for (const f of files) {
@@ -830,14 +947,15 @@ function abChecks(g, r) {
   }
   const base = summaryFor('baseline');
   if (!base) { out.push([false, 'no baseline score to compare with: cook/judge/baseline/summary.json (score the baseline)']); return out; }
+  if (!base.raw?.dims) { out.push([false, 'the baseline score has no raw dimensions: score the baseline again (gate.mjs score baseline)']); return out; }
   const now = summaryFor(r);
   const below = [];
-  for (const [d, b] of Object.entries(base.calibrated?.dims || {})) {
-    const v = now?.calibrated?.dims?.[d];
+  for (const [d, b] of Object.entries(base.raw.dims)) {
+    const v = now?.raw?.dims?.[d];
     if (typeof v !== 'number') { if (!(d === MOTION_DIM && g.motion === 'none')) below.push(`${d} not scored in ${r}`); continue; }
     if (v < b) below.push(`${d} ${v} (baseline ${b})`);
   }
-  out.push([below.length === 0, below.length ? `below the baseline in cook/judge/${r}/summary.json: ${below.join(', ')}` : 'no dimension below the baseline (cook/judge/baseline/summary.json)']);
+  out.push([below.length === 0, below.length ? `below the baseline in cook/judge/${r}/summary.json: ${below.join(', ')}` : 'no dimension below the baseline (raw judge medians, cook/judge/baseline/summary.json)']);
   return out;
 }
 
@@ -906,16 +1024,18 @@ function finalReport(g) {
   if (g.mode === 'redesign') {
     const bs = summaryFor('baseline');
     const ls = r ? summaryFor(r) : null;
-    L.push('', `## Before and after (calibrated, ${r ? `baseline against ${r}` : 'no round scored yet'})`, '');
+    L.push('', `## Before and after (raw judge medians, ${r ? `baseline against ${r}` : 'no round scored yet'})`, '');
     if (!bs) L.push('No baseline score (cook/judge/baseline/summary.json is missing).');
     else {
       L.push(`| Dimension | Baseline | ${r || 'Latest'} | Change |`, '|---|---|---|---|');
-      const rows = [['overall', bs.calibrated?.overall, ls?.calibrated?.overall],
-        ...Object.keys(bs.calibrated?.dims || {}).map((d) => [d, bs.calibrated.dims[d], ls?.calibrated?.dims?.[d]])];
+      const rows = [['overall', bs.raw?.overall, ls?.raw?.overall],
+        ...Object.keys(bs.raw?.dims || {}).map((d) => [d, bs.raw.dims[d], ls?.raw?.dims?.[d]])];
       for (const [name, b, v] of rows) {
         const diff = typeof b === 'number' && typeof v === 'number' ? r2(v - b) : null;
         L.push(`| ${name} | ${fmt(b)} | ${fmt(v)} | ${diff === null ? '-' : diff >= 0 ? `+${diff}` : String(diff)} |`);
       }
+      const ub = g.calibration?.baseline_user;
+      if (ub) L.push('', `The user rated the old site ${ub.user} (the judges ${ub.judges}). Recorded, not applied: the offset is ${g.calibration?.offset ?? 0}.`);
     }
     const bslop = readJson(S('baseline', 'slop.json'));
     const lname = r && existsSync(S('reports', `slop-${r}.json`)) ? `slop-${r}.json` : 'slop-step5.json';
@@ -1013,7 +1133,8 @@ if (isMainRun) {
         g.steps[a1] = { status: 'passed', at: new Date().toISOString(), evidence: done.map(([, m]) => m) };
         // The baseline's commit and tree state travel with the gates, for the final report and the regress check.
         // dirty_files: the pre-existing changes of a dirty baseline, so verify 5 can tell them from new edits.
-        if (a1 === '0b') { const m = readJson(S('baseline', 'meta.json')) || {}; g.baseline = { commit: m.commit ?? null, dirty: m.dirty === true, at: m.at ?? null, dirty_files: m.dirty_files && typeof m.dirty_files === 'object' ? m.dirty_files : {} }; }
+        // g.baseline.probes: the probes the user approved, so later edits that weaken a probe are caught (roundEvidence).
+        if (a1 === '0b') { const m = readJson(S('baseline', 'meta.json')) || {}; g.baseline = { commit: m.commit ?? null, dirty: m.dirty === true, at: m.at ?? null, dirty_files: m.dirty_files && typeof m.dirty_files === 'object' ? m.dirty_files : {}, probes: probeSnapshot() }; }
         save(g); console.log(`Step ${a1} marked PASSED.`);
       }
       process.exit(ok ? 0 : 1);
@@ -1236,7 +1357,12 @@ if (isMainRun) {
       const cur = g.calibration.offset;
       const last = g.calibration.history.at(-1)?.round;
       const newer = last !== undefined && roundRank(r) > roundRank(last);
-      if (next < cur || (newer && next !== cur)) {
+      if (r === 'baseline') {
+        // The baseline is the old site, not a calibration point: the user's rating is recorded for the report only.
+        g.calibration.baseline_user = { user, judges: s.raw.overall, at: new Date().toISOString(), quote: q };
+        save(g);
+        console.log(`recorded: you rate the old site ${user}, the judges ${s.raw.overall}. The offset stays ${cur}: calibrate on a round, not on the baseline.`);
+      } else if (next < cur || (newer && next !== cur)) {
         g.calibration.offset = next;
         g.calibration.history.push({ at: new Date().toISOString(), round: r, user, judges: s.raw.overall, offset: next, quote: q });
         save(g);

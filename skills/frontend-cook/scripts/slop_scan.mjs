@@ -9,6 +9,8 @@
 //   Findings are counted per fingerprint: if the baseline has N findings with a fingerprint, the first N
 //   findings with that fingerprint are "remaining"; any extra ones are "is_new". "fixed" lists the baseline
 //   occurrences that no longer appear.
+// The report records bans_sha1: the sha1 of the bans file it used (null when there is none), so the gate
+//   can tell a report made with the current bans from one made before a ban was added.
 // --exclude: a glob or a folder (relative to the current directory, '/' separators; `src/legacy`,
 //   `src/legacy/` and `./src/legacy` all work). Excluded files are still scanned; their findings are out of
 //   scope, so they fail the scan only when they are new.
@@ -17,6 +19,7 @@
 //   { "allowed": [ { "id": "em-dash", "quote": "em dashes are fine in the blog copy" } ],
 //     "extra":   [ { "id": "no-blue", "pattern": "#0000ff", "flags": "i", "message": "no pure blue" } ] }
 import { readFileSync, writeFileSync, mkdirSync, statSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, extname, relative, resolve, sep } from 'node:path';
 import { walk, isMain, MOTION_CODE, projectRoot, userSaid, isExcluded } from './_common.mjs';
 
@@ -276,6 +279,12 @@ function fontFamilies(text) {
   return fams;
 }
 
+// sha1 of the bans file's bytes, or null when there is no bans file.
+export function bansSha1(path) {
+  if (!path || !existsSync(path)) return null;
+  return createHash('sha1').update(readFileSync(path)).digest('hex');
+}
+
 function loadBans(path) {
   if (!path || !existsSync(path)) return { allowed: [], extra: [] };
   const j = JSON.parse(readFileSync(path, 'utf8'));
@@ -409,7 +418,7 @@ export function scan(targets, bansPath, opts = {}) {
   return { ok: !failing && files.length > 0, scanned: files.length, errors, warnings: findings.length - errors,
     allowed_by_user: [...allowed.entries()].map(([id, quote]) => ({ id, quote })),
     baseline: opts.baselinePath || null, exclude, new: newFp, fixed, remaining,
-    findings, cwd, at: new Date().toISOString() };
+    bans_sha1: bansSha1(bansPath), findings, cwd, at: new Date().toISOString() };
 }
 
 export const DEFAULT_BANS = {

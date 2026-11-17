@@ -477,6 +477,10 @@ function redesignProject() {
   assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'redesign', '--src', 'site', '--exclude', 'site/legacy/**', '--url', 'http://localhost:5173', '--pages', '/,/pricing']).code, 0);
   return d;
 }
+// sha1 of a project file (regress.mjs writes probes_sha1 this way), or null.
+function sha1Of(d, rel) {
+  try { return createHash('sha1').update(readFileSync(join(d, rel))).digest('hex'); } catch { return null; }
+}
 // The baseline files the scripts write (baseline.mjs), for every page, except the named stills.
 function baselineCapture(d, skip = []) {
   const B = (...p) => join(d, 'cook', 'baseline', ...p);
@@ -501,6 +505,17 @@ const FORM_PROBE = (page) => [{ name: 'contact form submits', page, viewport: 'd
   steps: [{ fill: { label: 'Email', value: 'a@b.co' } }, { click: { role: 'button', name: 'Send' } }], expect: [{ text: 'Thanks' }] }];
 // What baseline.mjs --probes-only writes for FORM_PROBE: its expectation is false before the steps and true after.
 const PROBE_ROWS = [{ name: 'contact form submits', page: '/', viewport: 'desktop', before: [false], after: [true], proves: true }];
+// A whole step 0b pass: the baseline files, the keep list, the probes and the user's approval. Verified.
+function passBaseline(d, probes = FORM_PROBE('/'), rows = PROBE_ROWS) {
+  baselineCapture(d);
+  write(join(d, 'cook', 'baseline', 'KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`));
+  write(join(d, 'cook', 'baseline', 'probes.json'), JSON.stringify(probes));
+  write(join(d, 'cook', 'baseline', 'probecheck.json'), JSON.stringify(rows));
+  say('approved the keep list and the stills', d);
+  assert.equal(runGate(d, ['approve', 'baseline', '--quote', 'approved the keep list and the stills']).code, 0);
+  const r = runGate(d, ['verify', '0b']);
+  assert.equal(r.code, 0, r.out);
+}
 
 test('redesign: init needs --src and --url, status lists step 0b, a new project has no 0b', () => {
   const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-init-')));
@@ -580,7 +595,8 @@ test('redesign: step 0b refuses each missing piece of the baseline, then passes'
   assert.equal(r.code, 0, r.out);
   const G = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
   assert.equal(G.steps['0b'].status, 'passed');
-  assert.deepEqual(G.baseline, { commit: 'abc1234def', dirty: true, at: meta.at, dirty_files: {} });
+  assert.deepEqual(G.baseline, { commit: 'abc1234def', dirty: true, at: meta.at, dirty_files: {},
+    probes: [{ name: 'contact form submits', page: '/', viewport: 'desktop', expect: [{ text: 'Thanks' }], request_nav: null }] });
   assert.equal(runGate(d, ['check', '1']).code, 0, 'step 1 may start after step 0b');
 
   // Stills changed after the approval: it no longer counts.
@@ -622,19 +638,39 @@ test('redesign: motion-allow needs a real hash, a reason and the user words; set
   assert.deepEqual(G().pages, ['/', '/about']);
 });
 
-test('redesign: calibrate re-bases from the baseline round to a later round', () => {
+test('redesign: calibrate re-bases from a later round; a rating of the baseline is recorded and never moves the offset', () => {
   const d = redesignProject();
-  const offset = () => JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8')).calibration.offset;
+  const G = () => JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  const offset = () => G().calibration.offset;
   judges('baseline', 9.0, d);                                  // raw 8.9
   assert.equal(runGate(d, ['score', 'baseline']).code, 0);
   say('I rate it 6 out of 10', d);
-  assert.equal(runGate(d, ['calibrate', '--user', '6', '--round', 'baseline', '--quote', 'I rate it 6 out of 10']).code, 0);
-  assert.equal(offset(), -2.9);
+  assert.match(runGate(d, ['calibrate', '--user', '6', '--round', 'baseline', '--quote', 'I rate it 6 out of 10']).out, /recorded: you rate the old site 6/);
+  assert.equal(offset(), 0, 'the baseline does not calibrate');
+  assert.equal(G().calibration.baseline_user.user, 6);
   judges('r03', 9.5, d);                                       // raw 9.4
   assert.equal(runGate(d, ['score', 'r03']).code, 0);
+  say('I rate it 6 out of 10 for the round', d);
+  assert.equal(runGate(d, ['calibrate', '--user', '6', '--round', 'r03', '--quote', 'I rate it 6 out of 10 for the round']).code, 0);
+  assert.equal(offset(), -3.4);
+  judges('r04', 9.5, d);                                       // raw 9.4
+  assert.equal(runGate(d, ['score', 'r04']).code, 0);
   say('I rate it 9.5 out of 10', d);
-  assert.match(runGate(d, ['calibrate', '--user', '9.5', '--round', 'r03', '--quote', 'I rate it 9.5 out of 10']).out, /re-based on r03/);
+  assert.match(runGate(d, ['calibrate', '--user', '9.5', '--round', 'r04', '--quote', 'I rate it 9.5 out of 10']).out, /re-based on r04/);
   assert.equal(offset(), 0);
+});
+
+test('redesign: calibrate on the baseline records the user\'s rating for the report, and the report says it is not applied', () => {
+  const d = redesignProject();
+  judges('baseline', 9.0, d);
+  assert.equal(runGate(d, ['score', 'baseline']).code, 0);
+  say('I rate it 6 out of 10', d);
+  assert.equal(runGate(d, ['calibrate', '--user', '6', '--round', 'baseline', '--quote', 'I rate it 6 out of 10']).code, 0);
+  const G = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  assert.equal(G.calibration.offset, 0);
+  assert.deepEqual(G.calibration.baseline_user, { user: 6, judges: 8.9, at: G.calibration.baseline_user.at, quote: 'I rate it 6 out of 10' });
+  assert.equal(runGate(d, ['report']).code, 0);
+  assert.match(readFileSync(join(d, 'cook', 'REPORT.md'), 'utf8'), /The user rated the old site 6 \(the judges 8\.9\)\. Recorded, not applied: the offset is 0\./);
 });
 
 test('redesign: verify 2 needs the old h1s and form fields in the mockup, and a three-way sheet', () => {
@@ -648,7 +684,7 @@ test('redesign: verify 2 needs the old h1s and form fields in the mockup, and a 
 
   // Present in the mockup: the h1 and the field name.
   write(join(d, 'cook', 'mockup', 'index.html'), page('<h1>Rope for boats</h1><input name="email">'));
-  assert.match(v2(), /PASS {2}mockup covers the baseline: 2 h1 and form field name/);
+  assert.match(v2(), /PASS {2}mockup covers the baseline on \/: 2 h1, nav and form field\(s\)/);
   png(join(d, 'cook', 'compare', 'mockup', 'three-way.png'), 1800, 900);
   assert.match(v2(), /PASS {2}three-way sheet: three-way\.png/);
 
@@ -701,14 +737,29 @@ function redesignRound(d, r, { regress = true } = {}) {
   mkdirSync(join(d, 'cook', 'judge', r), { recursive: true }); // a round exists once its judge folder does (pair.mjs makes it)
   for (const p of DIRS) for (const vp of ['desktop', 'mobile']) png(join(d, 'cook', 'stills', r, `${slugOf(p)}-${vp}.png`), vp === 'desktop' ? 1440 : 780, 900);
   write(join(d, 'cook', 'compare', r, 'all.jpg'), 'x');
-  slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', `cook/reports/slop-${r}.json`]);
+  // The step 5 record is what every round's slop scan is measured from (made once, the first time a round runs).
+  if (!existsSync(join(d, 'cook', 'reports', 'slop-step5.json'))) {
+    slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', 'cook/reports/slop-step5.json']);
+  }
+  slopRun(d, ['site', '--baseline', 'cook/reports/slop-step5.json', '--exclude', 'site/legacy/**', '--out', `cook/reports/slop-${r}.json`]);
   for (const p of DIRS) write(join(d, 'cook', 'reports', `audit-${r}-${slugOf(p)}.json`), JSON.stringify({ ok: true, url: pageUrl('http://localhost:5173', p), errors: 0 }));
-  if (regress) write(join(d, 'cook', 'reports', `regress-${r}.json`), JSON.stringify({ ok: true, errors: 0, warnings: 0, url: 'http://localhost:5173', pages: DIRS, findings: [], probes: [], checks: [], at: new Date().toISOString() }));
+  if (regress) write(join(d, 'cook', 'reports', `regress-${r}.json`), JSON.stringify({ ok: true, errors: 0, warnings: 0, url: 'http://localhost:5173', pages: DIRS, findings: [], probes: [], checks: [], probes_sha1: sha1Of(d, 'cook/baseline/probes.json'), at: new Date().toISOString() }));
 }
 const NEW_SIDE = (k) => k.new;
 const OLD_SIDE = (k) => (k.new === 'left' ? 'right' : 'left');
-const AB_KEY = [{ pair: 'ab-1', page: '/', viewport: 'desktop', new: 'right' }, { pair: 'ab-2', page: '/pricing', viewport: 'mobile', new: 'left' }];
+// The A/B key covers each baseline page on desktop and mobile (pair.mjs names the pairs ab-N, one per page and viewport).
+const AB_KEY = [
+  { pair: 'ab-1', page: '/', viewport: 'desktop', new: 'right' },
+  { pair: 'ab-2', page: '/', viewport: 'mobile', new: 'left' },
+  { pair: 'ab-3', page: '/pricing', viewport: 'desktop', new: 'right' },
+  { pair: 'ab-4', page: '/pricing', viewport: 'mobile', new: 'left' },
+];
 const pickAll = (pick, keys = AB_KEY) => keys.map((k) => ({ pair: k.pair, better: pick(k), why: 'the new side reads better' }));
+// The key and its pairs as pair.mjs writes them: the side-by-side images, then the key (so the key is not older).
+function writeKey(d, r, key = AB_KEY) {
+  for (const k of key) write(join(d, 'cook', 'compare', r, `${k.pair}.jpg`), 'x');
+  write(join(d, 'cook', 'judge', r, '.abkey.json'), JSON.stringify(key));
+}
 // Two judges, each with an ab list: judge-a is a builder subagent, judge-b a separate session.
 function judgesAB(d, r, overall, abA, abB = abA) {
   writeJudge(d, r, 'judge-a.json', { ...judgeDoc('A', overall, 'm1'), ab: abA }, 'builder', 'sub-1');
@@ -845,13 +896,13 @@ test('redesign: the step 5 slop scan and every round need the baseline and the e
   assert.match(v5(), /FAIL {2}slop scan of the source folders \(step 5\): the slop report does not scan every source folder \(missing site/, 'one file is not the folder');
   slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', 'cook/reports/slop-step5.json']);
   assert.doesNotMatch(v5(), /slop scan of the source folders \(step 5\): run slop_scan/);
-  assert.match(v5(), /slop scan of the source folders \(step 5\)/);
+  assert.match(v5(), /PASS {2}slop scan of the source folders \(step 5\): recorded/);
 
-  // Every round is held to the same rule.
+  // Every round is held to the same rule: measured from the step 5 record.
   redesignRound(d, 'r01');
   assert.doesNotMatch(runGate(d, ['verify', '6a']).out, /r01 slop scan: run slop_scan/);
   slopRun(d, ['site', '--out', 'cook/reports/slop-r01.json']);
-  assert.match(runGate(d, ['verify', '6a']).out, /FAIL {2}r01 slop scan: run slop_scan\.mjs with --baseline cook\/baseline\/slop\.json/);
+  assert.match(runGate(d, ['verify', '6a']).out, /FAIL {2}r01 slop scan: run slop_scan\.mjs with --baseline cook\/reports\/slop-step5\.json/);
 });
 
 test('redesign: 6a needs a strategy, a passing regress report, and no decorative motion left in the code', () => {
@@ -865,7 +916,7 @@ test('redesign: 6a needs a strategy, a passing regress report, and no decorative
   assert.match(v6a(), /FAIL {2}strategy not set/);
   assert.equal(runGate(d, ['set-strategy', '--in-place']).code, 0);
   assert.match(v6a(), /FAIL {2}r01 regress report missing \(cook\/reports\/regress-r01\.json\)/);
-  const regress = (ok, errors) => write(join(d, 'cook', 'reports', 'regress-r01.json'), JSON.stringify({ ok, errors, warnings: 0, url: 'http://localhost:5173', pages: DIRS, findings: [], probes: [], checks: [], at: new Date().toISOString() }));
+  const regress = (ok, errors) => write(join(d, 'cook', 'reports', 'regress-r01.json'), JSON.stringify({ ok, errors, warnings: 0, url: 'http://localhost:5173', pages: DIRS, findings: [], probes: [], checks: [], probes_sha1: sha1Of(d, 'cook/baseline/probes.json'), at: new Date().toISOString() }));
   regress(false, 2);
   assert.match(v6a(), /FAIL {2}r01 regress: 2 errors/);
   regress(true, 0);
@@ -904,20 +955,21 @@ test('redesign: verify 8 old against new: a key, a choice on the new side in eve
   assert.equal(runGate(d, ['score', 'r01']).code, 0);
   assert.match(v8(), /FAIL {2}no A\/B key for r01: run pair\.mjs --round r01/);
 
-  write(join(d, 'cook', 'judge', 'r01', '.abkey.json'), JSON.stringify(AB_KEY));
+  writeKey(d, 'r01');
   // judge-a prefers the old side in ab-1; judge-b leaves ab-2 out.
   judgesAB(d, 'r01', 9.6, pickAll((k) => (k.pair === 'ab-1' ? OLD_SIDE(k) : NEW_SIDE(k))), pickAll(NEW_SIDE, AB_KEY.slice(0, 1)));
   assert.equal(runGate(d, ['score', 'r01']).code, 0);
   let out = v8();
   assert.match(out, /FAIL {2}judge-a\.json: prefers the old site in ab-1 \(\/ desktop\)/);
-  assert.match(out, /FAIL {2}judge-b\.json: no ab entry for ab-2 \(\/pricing mobile\)/);
+  assert.match(out, /FAIL {2}judge-b\.json: no ab entry for ab-2 \(\/ mobile\)/);
   assert.doesNotMatch(out, /abkey/, 'the key is not a judge file');
 
   judgesAB(d, 'r01', 9.6, pickAll(NEW_SIDE));
   assert.equal(runGate(d, ['score', 'r01']).code, 0);
   out = v8();
-  assert.match(out, /PASS {2}judge-a\.json: every A\/B pair \(2\) chooses the new side/);
-  assert.match(out, /PASS {2}judge-b\.json: every A\/B pair \(2\) chooses the new side/);
+  assert.match(out, /PASS {2}judge-a\.json: every A\/B pair \(4\) chooses the new side/);
+  assert.match(out, /PASS {2}judge-b\.json: every A\/B pair \(4\) chooses the new side/);
+  assert.match(out, /PASS {2}A\/B key covers every baseline page on desktop and mobile \(2 page\(s\)\)/);
   assert.match(out, /PASS {2}no dimension below the baseline/);
   assert.doesNotMatch(out, /abkey/);
 });
@@ -928,7 +980,7 @@ test('redesign: verify 8 refuses a round where a dimension ends below the baseli
   judges('baseline', 9.0, d);
   assert.equal(runGate(d, ['score', 'baseline']).code, 0);
   redesignRound(d, 'r01');
-  write(join(d, 'cook', 'judge', 'r01', '.abkey.json'), JSON.stringify(AB_KEY));
+  writeKey(d, 'r01');
   judgesAB(d, 'r01', 8.0, pickAll(NEW_SIDE));
   assert.equal(runGate(d, ['score', 'r01']).code, 0);
   assert.match(runGate(d, ['verify', '8']).out, /FAIL {2}below the baseline in cook\/judge\/r01\/summary\.json: layout 7\.9 \(baseline 8\.9\)/);
@@ -961,4 +1013,222 @@ test('redesign: report writes cook/REPORT.md with the before and after table, Dr
   const mdNew = readFileSync(join(n, 'cook', 'REPORT.md'), 'utf8');
   assert.match(mdNew, /## Steps/);
   assert.doesNotMatch(mdNew, /Before and after/);
+});
+
+// ---- review round 2: the step 5 record, KEEP words, the probes approved at 0b, the mockup's pages, plain excludes,
+// raw medians, the A/B key and the design check's file text ----
+
+test('redesign: verify 5 records the scan: old in-scope slop and a ban added at step 5 still pass; a stale record and a round on the old baseline fail', () => {
+  const d = redesignProject();
+  write(join(d, 'site', 'app.css'), `${HIT_LINE}\nbody { background: #F5F5DC; }\nh1 { color: #111; }\n`);
+  baselineCapture(d);
+  slopRun(d, ['site', '--out', 'cook/baseline/slop.json']);
+  assert.ok(JSON.parse(readFileSync(join(d, 'cook', 'baseline', 'slop.json'), 'utf8')).errors > 0, 'the old site has in-scope slop');
+  const slopLine = () => lineWith(runGate(d, ['verify', '5']).out, /slop scan of the source folders/);
+  const step5 = () => slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', 'cook/reports/slop-step5.json']);
+
+  // Step 5: the user adds a ban the untouched old site breaks. The record is made and passes.
+  write(join(d, 'cook', 'bans.json'), JSON.stringify({ allowed: [], extra: [{ id: 'no-rope', pattern: 'Rope' }] }));
+  step5();
+  assert.ok(JSON.parse(readFileSync(join(d, 'cook', 'reports', 'slop-step5.json'), 'utf8')).new.length > 0, 'the new ban hits the old site');
+  assert.match(slopLine(), /PASS {2}slop scan of the source folders \(step 5\): recorded/);
+
+  // A ban changed after the record: the record no longer matches the bans.
+  write(join(d, 'cook', 'bans.json'), JSON.stringify({ allowed: [], extra: [{ id: 'no-rope', pattern: 'Rope' }, { id: 'no-zz', pattern: 'zz' }] }));
+  assert.match(slopLine(), /FAIL {2}slop scan of the source folders \(step 5\): the report was made with other bans than cook\/bans.json/);
+  step5();
+  assert.match(slopLine(), /PASS {2}slop scan of the source folders \(step 5\): recorded/);
+
+  // Every round is measured from the record. A round scanned against the old site's baseline fails.
+  redesignRound(d, 'r01');
+  slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', 'cook/reports/slop-r01.json']);
+  assert.match(runGate(d, ['verify', '6a']).out, /FAIL {2}r01 slop scan: run slop_scan\.mjs with --baseline cook\/reports\/slop-step5\.json/);
+});
+
+test('redesign: a bullet in Dropped or Copy changes quotes the user\'s own words, checked by verify 6a', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  const B = (...p) => join(d, 'cook', 'baseline', ...p);
+  write(B('KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`,
+    '- Hero video: the user said "drop the hero video"',
+    '- Field "email" becomes "Work email": the user said "rename the email field"'));
+  redesignRound(d, 'r01');
+  const line = () => lineWith(runGate(d, ['verify', '6a']).out, /Dropped and Copy changes|every Dropped and Copy changes line/);
+  assert.match(line(), /FAIL {2}Dropped and Copy changes lines need the user's exact words .*Hero video/, 'no typed words');
+  say('drop the hero video', d);
+  assert.match(line(), /FAIL {2}Dropped and Copy changes lines need .*Field "email"/, 'one line is still without the words');
+  say('rename the email field', d);
+  assert.match(line(), /PASS {2}every Dropped and Copy changes line \(2\) quotes the user's own words/);
+  write(B('KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`));
+  assert.match(line(), /PASS {2}every Dropped and Copy changes line \(0\)/, 'a line that says none is no entry');
+});
+
+test('redesign: the probes the user approved at 0b are the probes the rounds run on: a relabelled step passes, a weakened probe fails 6a', () => {
+  const d = redesignProject();
+  passBaseline(d);
+  const G = () => JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  assert.deepEqual(G().baseline.probes, [{ name: 'contact form submits', page: '/', viewport: 'desktop', expect: [{ text: 'Thanks' }], request_nav: null }]);
+  redesignRound(d, 'r01');
+  const probes = join(d, 'cook', 'baseline', 'probes.json');
+  const probeLine = () => lineWith(runGate(d, ['verify', '6a']).out, /probe "contact form submits"/);
+  assert.match(probeLine(), /PASS {2}probe "contact form submits" is as the user approved it at step 0b \(page, viewport, request expectations, 1 expectation/);
+
+  // A step's selector may change: the probe still checks the same thing.
+  const relabel = FORM_PROBE('/');
+  relabel[0].steps[0] = { fill: { label: 'Work email', value: 'a@b.co' } };
+  write(probes, JSON.stringify(relabel));
+  assert.match(probeLine(), /PASS {2}probe "contact form submits" is as the user approved it/);
+
+  // A cut expectation: the probe proves less than it did at 0b.
+  const cut = FORM_PROBE('/');
+  cut[0].expect = [];
+  write(probes, JSON.stringify(cut));
+  assert.match(probeLine(), /FAIL {2}probe "contact form submits" weakened since step 0b: it has 0 expectation\(s\), it had 1 at step 0b\. Restore/);
+
+  write(probes, '[]');
+  assert.match(probeLine(), /FAIL {2}probe "contact form submits" was removed since step 0b/);
+});
+
+test('redesign: a probe\'s request expectations are fixed at 0b, and the snapshot keeps whether each request was a navigation', () => {
+  const d = redesignProject();
+  const withRequest = [{ name: 'contact form submits', page: '/', viewport: 'desktop',
+    steps: [{ fill: { label: 'Email', value: 'a@b.co' } }, { click: { role: 'button', name: 'Send' } }],
+    expect: [{ request: '/api/contact' }, { text: 'Thanks' }] }];
+  passBaseline(d, withRequest, [{ ...PROBE_ROWS[0], request_nav: [false] }]);
+  const G = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  assert.deepEqual(G.baseline.probes, [{ name: 'contact form submits', page: '/', viewport: 'desktop', expect: withRequest[0].expect, request_nav: [false] }]);
+  redesignRound(d, 'r01');
+  const probeLine = () => lineWith(runGate(d, ['verify', '6a']).out, /probe "contact form submits"/);
+  assert.match(probeLine(), /PASS {2}probe "contact form submits" is as the user approved it/);
+  write(join(d, 'cook', 'baseline', 'probes.json'), JSON.stringify([{ ...withRequest[0], expect: [{ text: 'Thanks' }] }]));
+  assert.match(probeLine(), /FAIL {2}probe "contact form submits" weakened since step 0b: its request expectations changed; it has 1 expectation\(s\), it had 2/);
+});
+
+test('redesign: regress must have run on the current probes.json (probes_sha1): 6a refuses a regress report made from other probes', () => {
+  const d = redesignProject();
+  passBaseline(d);
+  redesignRound(d, 'r01');
+  const reg = join(d, 'cook', 'reports', 'regress-r01.json');
+  const line = () => lineWith(runGate(d, ['verify', '6a']).out, /regress ran on the current|regress was not run on the current/);
+  assert.match(line(), /PASS {2}r01 regress ran on the current probes\.json/);
+  const rj = JSON.parse(readFileSync(reg, 'utf8'));
+  write(reg, JSON.stringify({ ...rj, probes_sha1: 'f'.repeat(40) }));
+  assert.match(line(), /FAIL {2}r01 regress was not run on the current probes\.json \(probes_sha1 ffff/);
+  const { probes_sha1: _drop, ...noSha } = rj;
+  write(reg, JSON.stringify(noSha));
+  assert.match(line(), /FAIL {2}r01 regress was not run on the current probes\.json \(probes_sha1 missing/);
+  write(reg, JSON.stringify(rj));
+  assert.match(line(), /PASS {2}r01 regress ran on the current probes\.json/);
+  write(join(d, 'cook', 'baseline', 'probes.json'), JSON.stringify(FORM_PROBE('/').map((p) => ({ ...p, viewport: 'mobile' }))));
+  assert.match(line(), /FAIL {2}r01 regress was not run on the current probes\.json/, 'a probe edited after the regress run');
+});
+
+test('redesign: verify 2 checks the pages the mockup covers (the first page by default); a field is found by its label or its name', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  const B = (...p) => join(d, 'cook', 'baseline', ...p);
+  write(B('KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`));
+  const inv = JSON.parse(readFileSync(B('inventory.json'), 'utf8'));
+  inv.pages['/pricing'].headings = [{ level: 1, text: 'Simple, Transparent Pricing' }];
+  inv.pages['/'].forms[0].fields = [{ name: 'contact_email', type: 'email', label: 'Your email address', required: true }];
+  write(B('inventory.json'), JSON.stringify(inv));
+  const mockup = join(d, 'cook', 'mockup', 'index.html');
+  const v2 = () => lineWith(runGate(d, ['verify', '2']).out, /mockup covers the baseline|mockup does not cover/);
+
+  // A home-only mockup: the pricing h1 is not needed. The field passes by its label.
+  write(mockup, page('<h1>Rope for boats</h1><label>Your email address <input></label>'));
+  assert.match(v2(), /PASS {2}mockup covers the baseline on \/: 2 h1, nav and form field\(s\)/);
+  write(mockup, page('<h1>Rope for boats</h1><input name="contact_email">'));
+  assert.match(v2(), /PASS {2}mockup covers the baseline on \//, 'the field passes by its name');
+  write(mockup, page('<h1>Rope for boats</h1>'));
+  assert.match(v2(), /FAIL {2}mockup does not cover the baseline: missing "Your email address" \(\/\)/);
+
+  // Covering the pricing page: its h1 is needed, unless it is waived.
+  write(join(d, 'cook', 'BRIEF.md'), 'Mockup covers: /,/pricing\n');
+  write(mockup, page('<h1>Rope for boats</h1><label>Your email address <input></label>'));
+  assert.match(v2(), /FAIL {2}mockup does not cover the baseline: missing "Simple, Transparent Pricing" \(\/pricing\)/);
+  write(B('KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`,
+    '- Pricing heading "Simple, Transparent Pricing" is dropped: the user said "drop the pricing heading"'));
+  say('drop the pricing heading', d);
+  assert.match(v2(), /PASS {2}mockup covers the baseline on \/, \/pricing/, 'waived by the Dropped line');
+
+  write(join(d, 'cook', 'BRIEF.md'), 'Mockup covers: /,/nope\n');
+  const out2 = runGate(d, ['verify', '2']).out;
+  assert.match(out2, /FAIL {2}"Mockup covers" names \/nope, which the baseline inventory does not have/);
+  assert.match(out2, /PASS {2}mockup covers the baseline on \/: 2 h1, nav and form field\(s\)/, 'only the known page is checked');
+});
+
+test('redesign: --exclude with a plain folder takes its files out of the 6a animation check, as the glob does', () => {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-plain-')));
+  write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  write(join(d, 'site', 'index.html'), page('<h1>x</h1>'));
+  write(join(d, 'site', 'legacy', 'old.css'), `${HIT_LINE}\n`);
+  assert.equal(runGate(d, ['init', '--project', 'P', '--mode', 'redesign', '--src', 'site', '--exclude', 'site/legacy/', '--url', 'http://localhost:5173']).code, 0);
+  mkdirSync(join(d, 'cook', 'judge', 'r01'), { recursive: true }); // 6a reports the animation line once a round exists
+  const anim = () => lineWith(runGate(d, ['verify', '6a']).out, /animation code/);
+  assert.match(anim(), /PASS {2}no animation code in the static build/, 'legacy keyframes are out of scope');
+  write(join(d, 'site', 'app.css'), `${HIT_LINE}\n`);
+  assert.match(anim(), /FAIL {2}animation code in the static build \(motion waits for step 6b\): site\/app\.css:1/);
+});
+
+test('redesign: verify 8 compares raw judge medians: a calibration offset does not fail a round against the baseline', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  judges('baseline', 8.9, d);                    // raw colour 8.8, at offset 0
+  assert.equal(runGate(d, ['score', 'baseline']).code, 0);
+  redesignRound(d, 'r01');
+  writeKey(d, 'r01');
+  judgesAB(d, 'r01', 9.3, pickAll(NEW_SIDE));    // raw 9.2 in every dimension
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  say('I rate it 8.7 out of 10', d);
+  assert.equal(runGate(d, ['calibrate', '--user', '8.7', '--round', 'r01', '--quote', 'I rate it 8.7 out of 10']).code, 0);
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  const sum = JSON.parse(readFileSync(join(d, 'cook', 'judge', 'r01', 'summary.json'), 'utf8'));
+  assert.equal(sum.offset, -0.5);
+  assert.equal(sum.calibrated.dims.color, 8.7, 'calibrated, the colour is below the baseline');
+  assert.equal(sum.raw.dims.color, 9.2);
+  assert.match(runGate(d, ['verify', '8']).out, /PASS {2}no dimension below the baseline \(raw judge medians/);
+});
+
+test('redesign: the A/B key covers every baseline page on desktop and mobile; the key and pairs are newer than the fold stills; ab-N.jpg is not the side-by-side', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  judges('baseline', 9.0, d);
+  assert.equal(runGate(d, ['score', 'baseline']).code, 0);
+  redesignRound(d, 'r01');
+  judgesAB(d, 'r01', 9.6, pickAll(NEW_SIDE));
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  const v8 = (re) => lineWith(runGate(d, ['verify', '8']).out, re);
+  const compare = (f) => join(d, 'cook', 'compare', 'r01', f);
+
+  writeKey(d, 'r01', AB_KEY.slice(0, 2));
+  assert.match(v8(/A\/B key/), /FAIL {2}A\/B key has no pair for \/pricing desktop, \/pricing mobile/);
+  writeKey(d, 'r01');
+  assert.match(v8(/A\/B key covers/), /PASS {2}A\/B key covers every baseline page on desktop and mobile \(2 page\(s\)\)/);
+  assert.match(v8(/A\/B key and pairs|are newer than/), /PASS {2}the A\/B key and pairs are newer/);
+
+  // A fold still of the round made after the pairs: the pairs and the key are stale.
+  png(join(d, 'cook', 'stills', 'r01', 'home-desktop-fold.png'), 1440, 900);
+  later(join(d, 'cook', 'stills', 'r01', 'home-desktop-fold.png'));
+  assert.match(v8(/older than the round's fold stills/), /FAIL {2}\.abkey\.json, ab-1\.jpg, ab-2\.jpg, ab-3\.jpg, ab-4\.jpg older than the round's fold stills or the latest source change/);
+  // The pairs and the key are written again after the fold still: they are newer than it now.
+  writeKey(d, 'r01');
+  for (const k of AB_KEY) later(join(d, 'cook', 'compare', 'r01', `${k.pair}.jpg`));
+  later(join(d, 'cook', 'judge', 'r01', '.abkey.json'));
+  assert.match(v8(/are newer than/), /PASS {2}the A\/B key and pairs are newer/);
+
+  // The A/B pairs never satisfy the side-by-side with the references.
+  rmSync(compare('all.jpg'));
+  assert.match(lineWith(runGate(d, ['verify', '6a']).out, /side-by-side/), /FAIL {2}r01 side-by-side missing \(cook\/compare\/r01\/\)/);
+  rmSync(compare('ab-3.jpg'));
+  assert.match(v8(/A\/B side-by-side missing/), /FAIL {2}A\/B side-by-side missing: ab-3\.jpg/);
+});
+
+test('redesign: verify 5 reads the text of a .js file: an untracked component with JSX is a design file', () => {
+  const d = gitRedesign();
+  const line = () => lineWith(runGate(d, ['verify', '5']).out, /design files/);
+  write(join(d, 'src', 'components', 'util.js'), 'export const add = (a, b) => a + b;\n');
+  assert.match(line(), /PASS {2}design files vs the baseline commit: none changed \(1 file\(s\) in scope changed, none of them design\)/, 'plain logic is not design');
+  write(join(d, 'src', 'components', 'Hero.js'), 'export const Hero = () => <div className="hero">Rope</div>;\n');
+  assert.match(line(), /FAIL {2}design files changed before the mockup passed: src\/components\/Hero\.js$/);
 });
