@@ -85,7 +85,7 @@ async function checkBrowser() {
   } catch (e) { return { ok: false, detail: String(e.message) }; }
 }
 
-const result = { checked_at: new Date().toISOString(), cwd, checks: {}, installed: [], notes: [] };
+const result = { checked_at: new Date().toISOString(), cwd, checks: {}, installed: [], notes: [], warnings: [] };
 const C = result.checks;
 
 // Node
@@ -179,6 +179,31 @@ C.guard_hook = {
     : hs.ok ? `guard hook active in .claude/settings.json (${GUARD})` : 'guard hook not installed in this project. Run preflight.mjs --install (it adds PreToolUse and UserPromptSubmit hooks to .claude/settings.json)',
 };
 
+// .gitignore: cook/ holds logged prompts and working state, so it must not be committed.
+// A warning only: it never makes result.ok false. With --install, cook/ is added inside a git repo.
+const COOK_IGNORE_LINE = /^\/?cook\/?$/;
+function checkGitignore() {
+  if (!run('git', ['rev-parse', '--is-inside-work-tree'], 15000).ok) {
+    return { ok: true, detail: 'not a git repository, nothing to ignore' };
+  }
+  const ignored = () => run('git', ['check-ignore', '-q', 'cook/GATES.json'], 15000).ok;
+  if (ignored()) return { ok: true, detail: 'cook/ is git-ignored' };
+  if (INSTALL) {
+    const gi = join(cwd, '.gitignore');
+    const cur = existsSync(gi) ? readFileSync(gi, 'utf8') : '';
+    if (!cur.split(/\r?\n/).some((l) => COOK_IGNORE_LINE.test(l.trim()))) {
+      const head = cur && !cur.endsWith('\n') ? cur + '\n' : cur;
+      const gap = head.trim() ? '\n' : '';
+      writeFileSync(gi, `${head}${gap}# frontend-cook working state (contains logged prompts)\ncook/\n`);
+      result.installed.push({ what: '.gitignore', ok: true, command: `added cook/ to ${gi}` });
+    }
+    if (ignored()) return { ok: true, detail: 'cook/ added to .gitignore' };
+  }
+  return { ok: true, warn: true, detail: 'cook/ is not git-ignored: its logged prompts could be committed. Run preflight.mjs --install to add it to .gitignore' };
+}
+C.gitignore = checkGitignore();
+if (C.gitignore.warn) result.warnings.push(C.gitignore.detail);
+
 // Browser: with --install, add Playwright and Chromium under ~/.frontend-cook when no Playwright is found.
 if (INSTALL && !args.has('--skip-browser') && !loadPlaywright(cwd)) {
   const dir = join(homeDir(), '.frontend-cook');
@@ -204,9 +229,10 @@ if (WRITE) {
 
 if (JSON_ONLY) console.log(JSON.stringify(result, null, 2));
 else {
-  for (const [k, c] of Object.entries(C)) console.log(`${c.ok ? 'PASS' : 'FAIL'}  ${k.padEnd(13)} ${c.detail}`);
+  for (const [k, c] of Object.entries(C)) console.log(`${c.warn ? 'WARN' : c.ok ? 'PASS' : 'FAIL'}  ${k.padEnd(13)} ${c.detail}`);
   for (const i of result.installed) console.log(`${i.ok ? 'ADDED' : 'ERROR'} ${i.what}: ${i.command}`);
   for (const n of result.notes) console.log(`NOTE  ${n}`);
+  for (const w of result.warnings) console.log(`WARN  ${w}`);
   console.log(`\n${result.ok ? 'READY' : 'NOT READY'}: ${result.next}`);
 }
 process.exit(result.ok ? 0 : 1);
