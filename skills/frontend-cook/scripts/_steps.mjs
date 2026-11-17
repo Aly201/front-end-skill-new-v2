@@ -31,6 +31,18 @@ export async function runSteps(page, steps = [], timeout = 5000) {
   }
 }
 
+// Requests are recorded as { url, nav } by recordRequests (nav: a full-page navigation, e.g. a native form submit).
+// A plain string (a bare URL) is accepted too.
+export const requestUrl = (r) => (typeof r === 'string' ? r : String(r?.url ?? ''));
+
+// Starts recording the page's requests into the returned array. Callers clear it (requests.length = 0)
+// right before the steps, so the page's own document load never counts as a request expectation.
+export function recordRequests(page) {
+  const list = [];
+  page.on('request', (r) => list.push({ url: r.url(), nav: r.isNavigationRequest() }));
+  return list;
+}
+
 // One expectation: null when it holds, otherwise a failure string.
 async function checkOne(page, e, requests, timeout) {
   try {
@@ -38,8 +50,9 @@ async function checkOne(page, e, requests, timeout) {
     else if (e.text) await page.getByText(e.text, { exact: false }).first().waitFor({ state: 'visible', timeout });
     else if (e.request) {
       const t0 = Date.now();
-      while (!requests.some((u) => u.includes(e.request)) && Date.now() - t0 < timeout) await page.waitForTimeout(100);
-      if (!requests.some((u) => u.includes(e.request))) throw new Error(`no request to ${e.request}`);
+      const seen = () => requests.some((r) => requestUrl(r).includes(e.request));
+      while (!seen() && Date.now() - t0 < timeout) await page.waitForTimeout(100);
+      if (!seen()) throw new Error(`no request to ${e.request}`);
     } else throw new Error(`unknown expectation ${JSON.stringify(e)}`);
     return null;
   } catch (err) {
@@ -62,6 +75,26 @@ export async function checkExpectEach(page, expect = [], requests = [], timeout 
   const out = [];
   for (const e of expect) out.push(await checkOne(page, e, requests, timeout) === null);
   return out;
+}
+
+// One entry per expectation: for a request expectation, true when a matching request was a full-page
+// navigation, false when every matching request was a fetch or XHR, null when none matched or it is not a
+// request expectation. Call after checkExpect/checkExpectEach (the requests have already been waited for).
+export function requestNavEach(expect = [], requests = []) {
+  return expect.map((e) => {
+    if (!e || !e.request) return null;
+    const hits = requests.filter((r) => requestUrl(r).includes(e.request));
+    if (!hits.length) return null;
+    return hits.some((r) => r.nav === true);
+  });
+}
+
+// True when the main frame ended on a mocked URL it did not start on (a native form submit to a mocked endpoint
+// navigates to it; a JS handler that fetches does not).
+export function endsOnMock(finalUrl, startUrl, mocks = []) {
+  if (!finalUrl || finalUrl === startUrl) return false;
+  return (Array.isArray(mocks) ? mocks : []).some((m) => m && typeof m.url === 'string' && m.url
+    && String(finalUrl).includes(m.url));
 }
 
 // One boolean per expectation, read immediately with no waiting (for the state before the steps).

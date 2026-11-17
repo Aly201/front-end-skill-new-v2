@@ -1,6 +1,7 @@
 # Changelog
 
 ## 1.3.0
+Upgrading a redesign that already passed step 0b: run `gate.mjs verify 0b` again (rounds now check the probe snapshot taken there), and re-run the step-5 slop scan and round slop scans (they now record the bans file and compare against `cook/reports/slop-step5.json`).
 Redesign mode: improve an existing site without breaking what works.
 - `gate.mjs init --mode redesign` takes the source folders, exclusions, pages and checks (`set-checks`). Step 0b captures a baseline with `baseline.mjs`: stills, page inventory, slop and audit reports, motion hits and check results, plus `KEEP.md` and `probes.json`.
 - `regress.mjs` runs every round: lost links, nav items, forms, fields, headings and ids are errors unless `KEEP.md` names the drop with the user's words; probes and checks must still pass.
