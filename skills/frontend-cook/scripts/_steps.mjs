@@ -5,15 +5,18 @@
 //   { "fill":  { "label": "Email", "value": "a@b.co" } }
 //   { "hover": { "role": "link", "name": "Docs" } }
 //   { "press": "Enter" }   { "wait": 300 }
+// Matching is a substring, case-insensitive, unless the selector says "exact": true.
 // Expectations (probes only):
 //   { "visible": { "role": "dialog" } }  { "text": "Thanks" }  { "request": "/api/contact" }
+// Probes may also carry "mock": [{ "url": "/api/contact", "status": 200, "body": {...} }] (see applyMocks).
 
 export function locate(page, sel) {
   if (!sel || typeof sel !== 'object') throw new Error(`bad selector ${JSON.stringify(sel)}`);
-  if (sel.label) return page.getByLabel(sel.label, { exact: false }).first();
-  if (sel.role) return page.getByRole(sel.role, sel.name ? { name: sel.name, exact: false } : {}).first();
-  if (sel.text) return page.getByText(sel.text, { exact: false }).first();
-  if (sel.placeholder) return page.getByPlaceholder(sel.placeholder).first();
+  const exact = sel.exact === true;
+  if (sel.label) return page.getByLabel(sel.label, { exact }).first();
+  if (sel.role) return page.getByRole(sel.role, sel.name ? { name: sel.name, exact } : {}).first();
+  if (sel.text) return page.getByText(sel.text, { exact }).first();
+  if (sel.placeholder) return page.getByPlaceholder(sel.placeholder, { exact }).first();
   throw new Error(`selector needs label, role, text or placeholder: ${JSON.stringify(sel)}`);
 }
 
@@ -28,19 +31,65 @@ export async function runSteps(page, steps = [], timeout = 5000) {
   }
 }
 
+// One expectation: null when it holds, otherwise a failure string.
+async function checkOne(page, e, requests, timeout) {
+  try {
+    if (e.visible) await locate(page, e.visible).waitFor({ state: 'visible', timeout });
+    else if (e.text) await page.getByText(e.text, { exact: false }).first().waitFor({ state: 'visible', timeout });
+    else if (e.request) {
+      const t0 = Date.now();
+      while (!requests.some((u) => u.includes(e.request)) && Date.now() - t0 < timeout) await page.waitForTimeout(100);
+      if (!requests.some((u) => u.includes(e.request))) throw new Error(`no request to ${e.request}`);
+    } else throw new Error(`unknown expectation ${JSON.stringify(e)}`);
+    return null;
+  } catch (err) {
+    return `${JSON.stringify(e)}: ${String(err.message).split('\n')[0]}`;
+  }
+}
+
 // Returns a list of failure strings; empty means every expectation held.
 export async function checkExpect(page, expect = [], requests = [], timeout = 4000) {
   const fails = [];
   for (const e of expect) {
-    try {
-      if (e.visible) await locate(page, e.visible).waitFor({ state: 'visible', timeout });
-      else if (e.text) await page.getByText(e.text, { exact: false }).first().waitFor({ state: 'visible', timeout });
-      else if (e.request) {
-        const t0 = Date.now();
-        while (!requests.some((u) => u.includes(e.request)) && Date.now() - t0 < timeout) await page.waitForTimeout(100);
-        if (!requests.some((u) => u.includes(e.request))) throw new Error(`no request to ${e.request}`);
-      } else throw new Error(`unknown expectation ${JSON.stringify(e)}`);
-    } catch (err) { fails.push(`${JSON.stringify(e)}: ${String(err.message).split('\n')[0]}`); }
+    const f = await checkOne(page, e, requests, timeout);
+    if (f) fails.push(f);
   }
   return fails;
+}
+
+// One boolean per expectation, in order: true when it holds now (same waiting as checkExpect).
+export async function checkExpectEach(page, expect = [], requests = [], timeout = 4000) {
+  const out = [];
+  for (const e of expect) out.push(await checkOne(page, e, requests, timeout) === null);
+  return out;
+}
+
+// One boolean per expectation, read immediately with no waiting (for the state before the steps).
+// A request expectation is always false: nothing can have been requested before the steps ran.
+export async function expectNow(page, expect = []) {
+  const out = [];
+  for (const e of expect) {
+    try {
+      if (e.visible) out.push(await locate(page, e.visible).isVisible());
+      else if (e.text) out.push(await page.getByText(e.text, { exact: false }).first().isVisible());
+      else out.push(false);
+    } catch {
+      out.push(false);
+    }
+  }
+  return out;
+}
+
+// Fulfils every request whose URL includes mock.url with a fixed response, so a probe never reaches a real endpoint.
+// Defaults: status 200, body '{}', contentType application/json. The request still shows up in page 'request' events.
+export async function applyMocks(page, mocks = []) {
+  for (const m of Array.isArray(mocks) ? mocks : []) {
+    if (!m || typeof m.url !== 'string' || !m.url) throw new Error(`mock needs a url: ${JSON.stringify(m)}`);
+    const body = m.body === undefined ? '{}' : typeof m.body === 'string' ? m.body : JSON.stringify(m.body);
+    await page.route((u) => String(u).includes(m.url), (route) => route.fulfill({
+      status: m.status ?? 200,
+      contentType: m.contentType || 'application/json',
+      body,
+    }));
+  }
 }

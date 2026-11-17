@@ -3,6 +3,9 @@
     "name": "contact form submits and shows the thank-you text",
     "page": "/",
     "viewport": "desktop",
+    "mock": [
+      { "url": "/api/contact", "status": 200, "body": { "ok": true } }
+    ],
     "steps": [
       { "fill": { "label": "Name", "value": "Test User" } },
       { "fill": { "label": "Email", "value": "test@example.com" } },
@@ -15,14 +18,14 @@
     ]
   },
   {
-    "name": "mobile menu opens and shows the nav links",
+    "name": "mobile menu opens and shows the navigation",
     "page": "/",
     "viewport": "mobile",
     "steps": [
       { "click": { "role": "button", "name": "Menu" } }
     ],
     "expect": [
-      { "visible": { "role": "link", "name": "Pricing" } }
+      { "visible": { "role": "navigation" } }
     ]
   }
 ]

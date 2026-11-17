@@ -1,20 +1,25 @@
 #!/usr/bin/env node
 // Step 0b of redesign mode: records the untouched site before any design work.
-// Writes cook/baseline/: meta.json, stills (with --fold), motion recordings, slop.json,
-// audit-<slug>.json, inventory.json, motion.json and checks.json.
+// Writes cook/baseline/: meta.json (with dirty_files), stills (with --fold), motion recordings, slop.json,
+// audit-<slug>.json, inventory.json, motion.json, checks.json and, when cook/baseline/probes.json exists,
+// probecheck.json (each probe run once: expectations before the steps, after them, and whether one flipped).
 // Refuses a dirty git tree in scope.src unless --allow-dirty is given (gate needs the user's words for that).
 //
 // Usage: node baseline.mjs [--allow-dirty]     (run from the project root, where cook/GATES.json is)
+//        node baseline.mjs --probes-only       (only rewrites probecheck.json; use after writing probes.json)
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync, rmSync, statSync } from 'node:fs';
 import { join, resolve, relative, extname, dirname, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { projectRoot, readGates, loadPlaywright, launchBrowser, pageUrl, pageSlug, walk, motionHits, globToRe, FRONTEND_EXT, STATE_DIR } from './_common.mjs';
-import { inventoryOfUrl } from './_inventory.mjs';
+import { projectRoot, readGates, readJson, loadPlaywright, launchBrowser, pageUrl, pageSlug, walk, motionHits, isExcluded, FRONTEND_EXT, STATE_DIR } from './_common.mjs';
+import { inventoryOfUrl, VIEWPORTS } from './_inventory.mjs';
+import { runSteps, checkExpectEach, expectNow, applyMocks } from './_steps.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
 const allowDirty = argv.includes('--allow-dirty');
+const probesOnly = argv.includes('--probes-only');
 
 function die(code, msg) { console.error(`baseline: ${msg}`); process.exit(code); }
 
@@ -27,9 +32,81 @@ const scope = gates.scope?.src?.length ? gates.scope.src : (gates.build?.src ? [
 if (!scope.length) die(2, 'GATES.json has no scope.src (or build.src) to baseline.');
 const pages = gates.pages?.length ? gates.pages : ['/'];
 const checksCmds = gates.checks || [];
+// Excluded (legacy) files are not redesigned: not recorded for motion, not part of dirty_files.
+const excludes = Array.isArray(gates.scope?.exclude) ? gates.scope.exclude : [];
 
 const pw = loadPlaywright(root);
 if (!pw) die(1, 'Playwright not found. Run the setup check: node preflight.mjs');
+
+const baseDir = join(root, STATE_DIR, 'baseline');
+const probesPath = join(baseDir, 'probes.json');
+
+// One probe in a fresh context, run once with the flip check. Never throws: a failure is recorded in the row.
+async function flipCheck(browser, base, probe, name) {
+  const row = { name, page: probe.page || '/', viewport: probe.viewport || 'desktop', before: [], after: [], proves: false };
+  const expect = Array.isArray(probe.expect) ? probe.expect : [];
+  const failed = (msg) => {
+    row.error = msg;
+    row.before = expect.map(() => false);
+    row.after = expect.map(() => false);
+    return row;
+  };
+  const vp = VIEWPORTS[row.viewport];
+  if (!vp) return failed(`unknown viewport ${probe.viewport}`);
+  const { width, height, ...rest } = vp;
+  const ctx = await browser.newContext({ viewport: { width, height }, ...rest });
+  try {
+    const page = await ctx.newPage();
+    const requests = [];
+    page.on('request', (r) => requests.push(r.url()));
+    await applyMocks(page, probe.mock);
+    await page.goto(pageUrl(base, row.page), { waitUntil: 'load', timeout: 45000 });
+    try { await page.waitForLoadState('networkidle', { timeout: 8000 }); } catch { /* busy pages */ }
+    row.before = await expectNow(page, expect);
+    try { await runSteps(page, probe.steps || []); }
+    catch (e) { row.error = `steps: ${String(e.message).split('\n')[0]}`; }
+    row.after = await checkExpectEach(page, expect, requests);
+  } catch (e) {
+    return failed(`load: ${String(e.message).split('\n')[0]}`);
+  } finally {
+    await ctx.close();
+  }
+  row.proves = expect.some((_, i) => !row.before[i] && row.after[i]);
+  return row;
+}
+
+// Writes cook/baseline/probecheck.json from cook/baseline/probes.json. Returns the rows, or null when there are no probes.
+async function writeProbeCheck() {
+  const probes = readJson(probesPath, null);
+  if (!Array.isArray(probes)) return null;
+  const rows = [];
+  const { browser } = await launchBrowser(pw);
+  try {
+    for (let i = 0; i < probes.length; i++) {
+      rows.push(await flipCheck(browser, url, probes[i], probes[i].name || `probe ${i + 1}`));
+    }
+  } finally {
+    await browser.close();
+  }
+  writeFileSync(join(baseDir, 'probecheck.json'), JSON.stringify(rows, null, 2) + '\n');
+  return rows;
+}
+
+function reportProbeCheck(rows) {
+  const proving = rows.filter((r) => r.proves).length;
+  console.log(`  probe check: ${proving} of ${rows.length} probes prove something (${STATE_DIR}/baseline/probecheck.json)`);
+  for (const r of rows) {
+    if (!r.proves) console.log(`  probe proves nothing: "${r.name}"${r.error ? ` (${r.error})` : ''}`);
+  }
+}
+
+if (probesOnly) {
+  if (!existsSync(probesPath)) die(2, `no ${STATE_DIR}/baseline/probes.json to check.`);
+  const rows = await writeProbeCheck();
+  if (!rows) die(2, `${STATE_DIR}/baseline/probes.json is not a JSON array.`);
+  reportProbeCheck(rows);
+  process.exit(0);
+}
 
 // Git: commit and dirty state of the scope.
 function git(args) {
@@ -37,15 +114,35 @@ function git(args) {
   return r.status === 0 ? r.stdout : null;
 }
 const commit = git(['rev-parse', 'HEAD'])?.trim() || null;
-const status = git(['status', '--porcelain', '--', ...scope]);
+const status = git(['status', '--porcelain', '--untracked-files=all', '--', ...scope]);
 const dirty = Boolean(status && status.trim());
 if (dirty && !allowDirty) {
   die(1, `scope has uncommitted changes:\n${status.trim()}\nCommit or stash them, or pass --allow-dirty (gate approve needs the user's words for that).`);
 }
 
-const baseDir = join(root, STATE_DIR, 'baseline');
+// sha1 of each changed or new file under scope.src, so a later check can tell "already dirty at baseline" from "edited since".
+// Paths from porcelain output are relative to the repository top; they are stored relative to the project root.
+function dirtyFiles(statusText) {
+  const out = {};
+  const top = git(['rev-parse', '--show-toplevel'])?.trim();
+  if (!statusText || !top) return out;
+  for (const line of statusText.split('\n')) {
+    if (!line.trim()) continue;
+    let p = line.slice(3);
+    if (p.includes(' -> ')) p = p.split(' -> ').pop();
+    if (p.length > 1 && p.startsWith('"') && p.endsWith('"')) p = p.slice(1, -1);
+    const rel = relative(root, resolve(top, p)).split(sep).join('/');
+    if (!rel || rel.startsWith('..') || isExcluded(rel, excludes)) continue;
+    const abs = resolve(root, rel);
+    if (!existsSync(abs) || statSync(abs).isDirectory()) continue; // deleted files have no content to hash
+    out[rel] = createHash('sha1').update(readFileSync(abs)).digest('hex');
+  }
+  return out;
+}
+const dirtyMap = dirty ? dirtyFiles(status) : {};
+
+mkdirSync(join(baseDir, 'stills'), { recursive: true });
 const stillsDir = join(baseDir, 'stills');
-mkdirSync(stillsDir, { recursive: true });
 
 function runScript(script, args) {
   return spawnSync(process.execPath, [join(HERE, script), ...args], { cwd: root, encoding: 'utf8', timeout: 600000 });
@@ -99,12 +196,10 @@ for (const s of scope) {
   if (statSync(abs).isDirectory()) files.push(...walk(abs, FRONTEND_EXT));
   else if (FRONTEND_EXT.includes(extname(abs).toLowerCase())) files.push(abs);
 }
-// Excluded (legacy) files are not redesigned, so their motion is not recorded or classified.
-const excludeRes = (Array.isArray(gates.scope?.exclude) ? gates.scope.exclude : []).map((x) => globToRe(x));
 const motion = [];
 for (const f of files) {
   const rel = relative(root, f).split(sep).join('/');
-  if (excludeRes.some((re) => re.test(rel))) continue;
+  if (isExcluded(rel, excludes)) continue;
   for (const h of motionHits(readFileSync(f, 'utf8'), extname(f))) {
     motion.push({ file: rel, line: h.line, text: h.text, hash: h.hash });
   }
@@ -117,11 +212,14 @@ const checks = checksCmds.map((cmd) => {
   return { cmd, code: r.status ?? 1, tail: outText.slice(-400) };
 });
 
+// 7. Each probe once, with the flip check (only when probes.json exists yet).
+const probeRows = await writeProbeCheck();
+
 writeFileSync(join(baseDir, 'inventory.json'), JSON.stringify(inventory, null, 2) + '\n');
 writeFileSync(join(baseDir, 'motion.json'), JSON.stringify(motion, null, 2) + '\n');
 writeFileSync(join(baseDir, 'checks.json'), JSON.stringify(checks, null, 2) + '\n');
 const at = new Date().toISOString();
-writeFileSync(join(baseDir, 'meta.json'), JSON.stringify({ commit, dirty, at, url, pages }, null, 2) + '\n');
+writeFileSync(join(baseDir, 'meta.json'), JSON.stringify({ commit, dirty, at, url, pages, dirty_files: dirtyMap }, null, 2) + '\n');
 
 console.log(`baseline written to ${STATE_DIR}/baseline/ (commit ${commit || 'none'}${dirty ? ', dirty' : ''})`);
 console.log(`  pages: ${pages.join(', ')}`);
@@ -131,4 +229,6 @@ for (const page of pages) {
 }
 console.log(`  motion hits: ${motion.length}`);
 for (const c of checks) console.log(`  check exit ${c.code}: ${c.cmd}`);
+if (probeRows) reportProbeCheck(probeRows);
+else console.log(`  no ${STATE_DIR}/baseline/probes.json yet: write probes, then run node baseline.mjs --probes-only`);
 process.exit(0);

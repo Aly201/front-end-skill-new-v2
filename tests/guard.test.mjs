@@ -233,7 +233,8 @@ test('redesign motion: an Edit that keeps an existing transition and changes a c
   assert.equal(kf.code, 2, 'an added @keyframes is blocked in static');
   assert.match(kf.err, /static first/);
   assert.match(kf.err, /@keyframes spin/);
-  assert.match(kf.err, new RegExp(`motion-allow src/card\\.css [0-9a-f]{12} --reason`));
+  // the line is not in the file yet, so the message gives the --text form (the hash form needs it on disk)
+  assert.match(kf.err, /motion-allow src\/card\.css --text '@keyframes spin \{ to \{ transform: rotate\(360deg\) \} \}' --reason .* --quote/);
   const multi = runIn(dir, { tool_name: 'MultiEdit', tool_input: { file_path: 'src/card.css', edits: [
     { old_string: 'color: red;', new_string: 'color: blue;' },
     { old_string: 'a {', new_string: 'a {\n  animation: spin 1s linear infinite;' },
@@ -267,4 +268,112 @@ test('redesign motion: after step 6a, motion is allowed; with motion none it is 
   assert.equal(wr(dir, 'src/a.css', '@keyframes rise {}').code, 0, 'motion allowed after 6a');
   const none = makeProj(redesignGates(['0', '1', '2', '3', '4', '5', '6a'], { motion: 'none', motion_quote: 'no animation' }));
   assert.match(wr(none, 'src/a.css', '@keyframes rise {}').err, /chose no motion/);
+});
+
+test('redesign reminder on each prompt names step 0b (baseline) before step 1', () => {
+  const dir = makeProj(redesignGates(['0']));
+  const prompt = (d) => runIn(d, { hook_event_name: 'UserPromptSubmit', prompt: 'go on' });
+  assert.match(prompt(dir).out, /Current step: 0b \(baseline\)/);
+  const after0b = makeProj(redesignGates(['0', '0b']));
+  assert.match(prompt(after0b).out, /Current step: 1 \(references\)/);
+  const newMode = makeProj({ steps: stepsObj(['0']) });
+  assert.match(prompt(newMode).out, /Current step: 1 \(references\)/, 'a new-mode run has no step 0b');
+});
+
+test('Bash glob under cook/ is blocked when it names a protected file, allowed for ordinary files', () => {
+  const dir = makeProj(redesignGates(['0']));
+  mkdirSync(join(dir, 'cook', 'shots'), { recursive: true });
+  writeFileSync(join(dir, 'cook', '.ledger.jsonl'), '');
+  writeFileSync(join(dir, 'cook', 'shots', 'a.png'), 'x');
+  const b = (command) => runIn(dir, { tool_name: 'Bash', tool_input: { command } });
+  assert.equal(b('printf x >> cook/.ledger.json?').code, 2, 'a ? glob that names the ledger is blocked');
+  assert.equal(b('echo {} > cook/GATES.js?n').code, 2, 'a ? glob that names GATES.json is blocked');
+  assert.equal(b('rm cook/*.jsonl').code, 2, 'a * glob that names the ledger is blocked');
+  assert.equal(b('rm cook/shots/*.png').code, 0, 'a glob of ordinary files is allowed');
+  assert.equal(b('cat cook/GATES.js*').code, 0, 'reading a protected glob is fine');
+});
+
+test('git clean with -x or -X is blocked, a plain git clean is allowed', () => {
+  const dir = makeProj(redesignGates(['0']));
+  const b = (command) => runIn(dir, { tool_name: 'Bash', tool_input: { command } });
+  assert.equal(b('git clean -fdX').code, 2, 'git clean -X removes the git-ignored cook/');
+  assert.match(b('git clean -fdx').err, /git clean -x and -X/);
+  assert.equal(b('git clean -fdx').code, 2, 'lowercase -x is blocked too');
+  assert.equal(b('git clean -fd').code, 0, 'git clean without x is allowed');
+});
+
+test('rm of the cook folder itself is blocked, rm of a folder inside it is allowed', () => {
+  const dir = makeProj(redesignGates(['0']));
+  const b = (command) => runIn(dir, { tool_name: 'Bash', tool_input: { command } });
+  assert.equal(b('rm -rf cook').code, 2);
+  assert.equal(b('rm -rf ./cook/').code, 2, 'the ./cook/ form is blocked too');
+  assert.match(b('rm -rf cook').err, /move it aside/);
+  assert.equal(b('rm -rf cook/stills/r01').code, 0, 'a folder inside cook/ is allowed');
+});
+
+test('cp -t and --target-directory into protected files under cook/ are blocked', () => {
+  const dir = makeProj(redesignGates(['0']));
+  mkdirSync(join(dir, 'cook', 'judge', 'r01'), { recursive: true });
+  const b = (command) => runIn(dir, { tool_name: 'Bash', tool_input: { command } });
+  assert.equal(b('cp -t cook/ /tmp/GATES.json').code, 2, 'cp -t puts GATES.json into cook/');
+  assert.equal(b('cp -t cook/baseline /tmp/meta.json').code, 2, 'cp -t into the baseline names a script file');
+  assert.equal(b('cp --target-directory=cook/judge/r01 /tmp/x/.abkey.json').code, 2, 'the long form is checked too');
+  assert.equal(b('cp -t cook/shots /tmp/a.png').code, 0, 'cp -t into an ordinary folder is allowed');
+});
+
+test('mv of cook to an archive folder is the documented restart and is allowed', () => {
+  const dir = makeProj(redesignGates(['0']));
+  assert.equal(runIn(dir, { tool_name: 'Bash', tool_input: { command: 'mv cook cook-archive/2026-11-17' } }).code, 0);
+});
+
+test('probecheck.json is a script-written baseline file: blocked as a write, readable', () => {
+  const dir = makeProj(redesignGates(['0']));
+  assert.equal(wr(dir, 'cook/baseline/probecheck.json', '[]').code, 2, 'a file write is blocked');
+  const b = (command) => runIn(dir, { tool_name: 'Bash', tool_input: { command } });
+  assert.equal(b('echo [] > cook/baseline/probecheck.json').code, 2, 'a shell write is blocked');
+  assert.equal(b('cat cook/baseline/probecheck.json').code, 0, 'reading it is fine');
+});
+
+test('mode new: src/App.js is design code and is blocked before step 5', () => {
+  const dir = makeProj({ steps: stepsObj(['0', '1', '2']) });
+  const app = wr(dir, 'src/App.js', 'export default function App() { return 1 }');
+  assert.equal(app.code, 2, 'a .js file in a new-mode build is blocked before step 5');
+  assert.match(app.err, /steps 2 to 5/);
+  assert.equal(wr(makeProj({ steps: stepsObj(['0', '1', '2', '3', '4', '5']) }), 'src/App.js', 'x').code, 0, 'allowed after step 5');
+});
+
+test('redesign: .js with JSX is blocked, pure logic .js is allowed, a .css.ts style module is blocked', () => {
+  const dir = makeProj(redesignGates(['0', '1', '2', '3', '4']));
+  assert.equal(wr(dir, 'src/App.js', 'export default function App() { return (<h1>Hi</h1>) }').code, 2, 'JSX in a .js file is design');
+  assert.equal(wr(dir, 'src/utils.js', 'export const total = (a, b) => a + b').code, 0, 'pure logic is allowed');
+  assert.equal(wr(dir, 'src/hero.css.ts', 'export const hero = "color: red"').code, 2, 'a style module by name is design');
+});
+
+test('motion: a test file may stub requestAnimationFrame in the static stage, a component may not', () => {
+  const dir = makeProj(redesignGates(['0', '1', '2', '3', '4', '5']));
+  assert.equal(wr(dir, 'src/Hero.test.jsx', 'vi.stubGlobal("requestAnimationFrame", cb)').code, 0, 'a test file is not checked for motion');
+  assert.equal(wr(dir, 'src/__tests__/Hero.jsx', 'vi.stubGlobal("requestAnimationFrame", cb)').code, 0, '__tests__ is not checked either');
+  assert.equal(wr(dir, 'src/Hero.jsx', 'requestAnimationFrame(cb)').code, 2, 'the same call in a component is blocked');
+});
+
+test('motion: a reduced-motion reset (animation: none) is allowed in the static stage', () => {
+  const dir = makeProj(redesignGates(['0', '1', '2', '3', '4', '5']));
+  assert.equal(wr(dir, 'src/hero.css', '@media (prefers-reduced-motion: reduce) {\n  .hero { animation: none; }\n}').code, 0);
+});
+
+test('motion: a brand-new motion line gets the --text form of motion-allow, an on-disk line gets the hash form', () => {
+  const dir = makeProj(redesignGates(['0', '1', '2', '3', '4', '5']));
+  mkdirSync(join(dir, 'src', 'hooks'), { recursive: true });
+  const line = 'const o = new IntersectionObserver(cb)';
+  const fresh = wr(dir, 'src/hooks/useLazy.js', line);
+  assert.equal(fresh.code, 2);
+  assert.match(fresh.err, /motion-allow src\/hooks\/useLazy\.js --text 'const o = new IntersectionObserver\(cb\)' --reason .* --quote/,
+    'the block message names the --text form, with --reason and --quote');
+  assert.doesNotMatch(fresh.err, new RegExp(`motion-allow src/hooks/useLazy\\.js ${lineHash(line)}`), 'no hash form for a line not on disk');
+
+  writeFileSync(join(dir, 'src', 'lazy.js'), `a\n${line}\n`);
+  const again = ed(dir, 'src/lazy.js', 'a', `a\n${line}`);
+  assert.equal(again.code, 2, 'a second copy of the line is blocked');
+  assert.match(again.err, new RegExp(`motion-allow src/lazy\\.js ${lineHash(line)} --reason .* --quote`),
+    'the line is on disk, so the hash form is given');
 });

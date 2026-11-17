@@ -12,7 +12,7 @@ import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { projectRoot, readGates, readJson, loadPlaywright, launchBrowser, pageUrl, STATE_DIR } from './_common.mjs';
 import { diffInventory, inventoryOfUrl, VIEWPORTS } from './_inventory.mjs';
-import { runSteps, checkExpect } from './_steps.mjs';
+import { runSteps, checkExpect, applyMocks } from './_steps.mjs';
 
 const argv = process.argv.slice(2);
 const opt = (k, d = null) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
@@ -62,6 +62,7 @@ async function runProbe(browser, base, probe) {
     const page = await ctx.newPage();
     const requests = [];
     page.on('request', (r) => requests.push(r.url()));
+    await applyMocks(page, probe.mock);
     await page.goto(pageUrl(base, probe.page || '/'), { waitUntil: 'load', timeout: 45000 });
     try { await page.waitForLoadState('networkidle', { timeout: 8000 }); } catch { /* busy pages */ }
     try { await runSteps(page, probe.steps || []); }

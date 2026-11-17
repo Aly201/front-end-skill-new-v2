@@ -65,7 +65,7 @@ Selectors are by role and name, or by label or text, never by class or DOM path.
 
 Rules for probes:
 - **Dev or staging only.** Probes run against a dev or staging URL, never production. A probe that submits a form changes real data there.
-- **Mock the submits.** A per-probe `"mock"` fulfils matching requests in the browser, so a form submit does not reach a real backend. It is opt-in, per probe: `"mock": [{ "url": "/api/contact", "status": 200, "body": "{\"ok\":true}" }]`.
+- **Mock the submits.** A per-probe `"mock"` fulfils matching requests in the browser, so a form submit does not reach a real backend. It is opt-in, per probe: `"mock": [{ "url": "/api/contact", "status": 200, "body": "{\"ok\":true}" }]`. The `url` matches as a substring of the request URL, so keep it specific: a bare `/` would answer every request, including the page itself.
 - **Exact names where a loose match would pass a broken page.** Selectors match loosely by default. Add `"exact": true` to a selector to require the whole name (opt-in). A menu probe that must fail when the menu is broken targets `{ "role": "navigation" }` or uses `"exact": true`.
 - **Every probe must prove something.** `node <skill>/scripts/baseline.mjs --probes-only` runs each probe once before its steps and once after, and writes `cook/baseline/probecheck.json`: `[{name, page, viewport, before:[bool], after:[bool], proves}]`. `proves` is true when some expectation is false before the steps and true after. A `request` expectation counts as false before. A probe that is already true before it acts passes on any page: fix it until `proves` is true.
 

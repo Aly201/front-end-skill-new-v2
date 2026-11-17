@@ -8,6 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { loadPlaywright, imageSize } from '../skills/frontend-cook/scripts/_common.mjs';
 import { diffInventory } from '../skills/frontend-cook/scripts/_inventory.mjs';
 
@@ -207,6 +208,9 @@ describe('redesign baseline and regress', { skip: pw ? false : 'Playwright not i
     for (const f of ['home-desktop.png', 'home-mobile.png', 'home-desktop-fold.png', 'home-mobile-fold.png', 'home-desktop-motion.webm']) {
       assert.ok(existsSync(join(dir, 'stills', f)), `missing stills/${f}`);
     }
+    // Not a git repo: nothing is dirty. The probe check ran because probes.json exists.
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, 'meta.json'), 'utf8')).dirty_files, {});
+    assert.equal(JSON.parse(readFileSync(join(dir, 'probecheck.json'), 'utf8')).length, 1);
     const inv = JSON.parse(readFileSync(join(dir, 'inventory.json'), 'utf8')).pages['/'];
     assert.ok(inv.headings.some((h) => h.level === 1 && h.text === 'Welcome to Acme'));
     assert.ok(inv.forms.some((f) => f.fields.some((x) => x.name === 'email')));
@@ -312,5 +316,179 @@ describe('pair.mjs', { skip: hasFfmpeg ? false : 'ffmpeg not installed' }, () =>
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------- probe check: flip, mocks, --probes-only, regress mocks, dirty_files ----------
+
+const TEMPLATE_PROBES = JSON.parse(readFileSync(resolve(import.meta.dirname, '..', 'skills', 'frontend-cook', 'templates', 'probes.example.json'), 'utf8'));
+// Only a link named exactly "Pricing" in the nav: the "exact" flag must reach locate().
+const EXACT_LINK_PROBE = {
+  name: 'exact pricing link probe',
+  page: '/',
+  viewport: 'mobile',
+  steps: [{ click: { role: 'button', name: 'Menu' } }],
+  expect: [{ visible: { role: 'link', name: 'Pricing', exact: true } }],
+};
+const PROBE_PROBES = [...TEMPLATE_PROBES, EXACT_LINK_PROBE];
+const CONTACT_PROBE = (probes) => probes.find((p) => p.name.startsWith('contact form'));
+
+// A "Menu" button that either opens the nav (menuWorks) or does nothing. The hero has a "See pricing" link.
+function probeSite({ menuWorks }) {
+  const menuScript = menuWorks
+    ? `<script>document.getElementById('menu').addEventListener('click', function () { document.getElementById('nav').hidden = false; });</script>`
+    : '';
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Acme</title></head>
+<body>
+<header>
+<button type="button" id="menu">Menu</button>
+<nav id="nav" hidden><a href="/">Home</a> <a href="/pricing.html">Pricing</a></nav>
+</header>
+<main>
+<h1>Welcome to Acme</h1>
+<a href="/pricing.html">See pricing</a>
+<form id="contact" action="/api/contact" method="post">
+<label for="name">Name</label> <input id="name" name="name" type="text">
+<label for="email">Email</label> <input id="email" name="email" type="email">
+<label for="message">Message</label> <textarea id="message" name="message"></textarea>
+<button type="submit">Send</button>
+</form>
+<p id="thanks" hidden>Thanks for writing</p>
+</main>
+<script>
+document.getElementById('contact').addEventListener('submit', function (e) {
+  e.preventDefault();
+  fetch('/api/contact', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    .then(function () { document.getElementById('thanks').hidden = false; });
+});
+</script>
+${menuScript}
+</body></html>
+`;
+}
+
+// Serves the site folder and records every POST path, so a test can tell whether a probe reached the real endpoint.
+function serveSite(dir, posts) {
+  return new Promise((ok) => {
+    const srv = createServer((req, res) => {
+      const p = new URL(req.url, 'http://local').pathname;
+      if (req.method === 'POST') {
+        posts.push(p);
+        req.resume();
+        req.on('end', () => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{"ok":true}');
+        });
+        return;
+      }
+      try {
+        const file = join(dir, p === '/' ? 'index.html' : p);
+        res.writeHead(200, { 'content-type': file.endsWith('.html') ? 'text/html; charset=utf-8' : 'application/octet-stream' });
+        res.end(readFileSync(file));
+      } catch {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end('not found');
+      }
+    });
+    srv.listen(0, '127.0.0.1', () => ok(srv));
+  });
+}
+
+describe('probe check, mocks, --probes-only and dirty_files', { skip: pw ? false : 'Playwright not installed' }, () => {
+  let root;
+  let srv;
+  let base;
+  const posts = [];
+  const cookJson = (rel) => JSON.parse(readFileSync(join(root, 'cook', rel), 'utf8'));
+  const rowOf = (rows, text) => rows.find((r) => r.name.includes(text));
+  const writeSiteFile = (menuWorks) => writeFileSync(join(root, 'site', 'index.html'), probeSite({ menuWorks }));
+
+  before(async () => {
+    root = mkdtempSync(join(tmpdir(), 'redesign-probe-'));
+    mkdirSync(join(root, 'site'), { recursive: true });
+    writeSiteFile(false);
+    srv = await serveSite(join(root, 'site'), posts);
+    base = `http://127.0.0.1:${srv.address().port}`;
+    mkdirSync(join(root, 'cook', 'baseline'), { recursive: true });
+    writeFileSync(join(root, 'cook', 'GATES.json'), JSON.stringify({
+      mode: 'redesign',
+      build: { src: 'site', url: base },
+      scope: { src: ['site'], exclude: [] },
+      pages: ['/'],
+      checks: [],
+      steps: {},
+    }, null, 2));
+    writeFileSync(join(root, 'cook', 'baseline', 'KEEP.md'), KEEP_EMPTY);
+    writeFileSync(join(root, 'cook', 'baseline', 'probes.json'), JSON.stringify(PROBE_PROBES, null, 2));
+    const git = (...args) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    git('init', '-q');
+    git('add', 'site');
+    git('-c', 'user.name=test', '-c', 'user.email=test@example.invalid', 'commit', '-q', '-m', 'site');
+  });
+
+  after(() => {
+    srv?.close();
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  test('a broken menu proves nothing; the form probe with a mock never posts to the endpoint', { timeout: LONG }, async () => {
+    const r = await script('baseline.mjs', [], root);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.deepEqual(cookJson('baseline/meta.json').dirty_files, {});
+    const rows = cookJson('baseline/probecheck.json');
+    assert.equal(rows.length, 3);
+    assert.equal(rowOf(rows, 'menu').proves, false);
+    assert.equal(rowOf(rows, 'exact pricing').proves, false);
+    assert.equal(CONTACT_PROBE(rows).proves, true);
+    assert.deepEqual(posts, [], 'the mocked form probe reached the real endpoint');
+  });
+
+  test('without a mock the form probe does reach the endpoint (control for the test above)', { timeout: LONG }, async () => {
+    const noMock = PROBE_PROBES.map((p) => (p.mock ? { ...p, mock: undefined } : p));
+    writeFileSync(join(root, 'cook', 'baseline', 'probes.json'), JSON.stringify(noMock, null, 2));
+    try {
+      const r = await script('baseline.mjs', ['--probes-only'], root);
+      assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.ok(posts.includes('/api/contact'));
+    } finally {
+      writeFileSync(join(root, 'cook', 'baseline', 'probes.json'), JSON.stringify(PROBE_PROBES, null, 2));
+      posts.length = 0;
+    }
+  });
+
+  test('--probes-only rewrites probecheck.json after the menu is fixed, and does not recapture', { timeout: LONG }, async () => {
+    const before = cookJson('baseline/meta.json').at;
+    writeSiteFile(true);
+    const r = await script('baseline.mjs', ['--probes-only'], root);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const rows = cookJson('baseline/probecheck.json');
+    assert.equal(rowOf(rows, 'menu').proves, true);
+    assert.equal(rowOf(rows, 'exact pricing').proves, true);
+    assert.equal(cookJson('baseline/meta.json').at, before, 'meta.json was rewritten: a full baseline ran');
+    assert.deepEqual(posts, []);
+  });
+
+  test('regress applies the mocks as well', { timeout: LONG }, async () => {
+    const r = await script('regress.mjs', ['--out', 'cook/reports/regress-probe.json'], root);
+    const rep = cookJson('reports/regress-probe.json');
+    assert.equal(rep.probes.length, 3, `${r.stdout}\n${r.stderr}`);
+    assert.ok(rep.probes.every((p) => p.ok), JSON.stringify(rep.probes));
+    assert.deepEqual(posts, []);
+  });
+
+  test('dirty_files records a modified tracked file and a new file with their sha1', { timeout: LONG }, async () => {
+    const indexPath = join(root, 'site', 'index.html');
+    writeFileSync(indexPath, `${readFileSync(indexPath, 'utf8')}<!-- edited -->\n`);
+    writeFileSync(join(root, 'site', 'new.html'), '<!doctype html><title>new</title>\n');
+    const r = await script('baseline.mjs', ['--allow-dirty'], root);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    const meta = cookJson('baseline/meta.json');
+    assert.equal(meta.dirty, true);
+    const sha1 = (p) => createHash('sha1').update(readFileSync(join(root, p))).digest('hex');
+    assert.deepEqual(meta.dirty_files, {
+      'site/index.html': sha1('site/index.html'),
+      'site/new.html': sha1('site/new.html'),
+    });
   });
 });
