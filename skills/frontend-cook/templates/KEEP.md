@@ -24,9 +24,9 @@ Text that changes: old text, new text, and the user's words.
 
 ## Motion
 
-One row per hit in cook/baseline/motion.json. Hashes are copied from that file.
+One row per hit in cook/baseline/motion.json. Hashes are copied from that file (12 hex characters each).
 
 | file:line | hash | functional/decorative | keep/replace/remove |
 |---|---|---|---|
-| src/components/Stats.jsx:4 | 3f2a9c1e | decorative | remove |
-| src/hooks/useLazy.js:12 | 9d0b7a44 | functional | keep |
+| src/components/Stats.jsx:4 | 3f2a9c1e0b7d | decorative | remove |
+| src/hooks/useLazy.js:12 | 9d0b7a44c1e2 | functional | keep |

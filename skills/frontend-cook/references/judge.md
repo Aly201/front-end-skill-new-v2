@@ -16,6 +16,7 @@ The builder never scores its own work. Judges are fresh: no history, no code, no
 - `cook/stills/<round>/*-fold.png` and the full-page stills, desktop and mobile.
 - For motion rounds: `cook/stills/<round>/*-motion-strip.jpg` and the `.webm` path.
 - Redesign rounds only: `cook/compare/<round>/ab-*.jpg`, pairs of the old site and the round's build, side by side, with no labels. Left or right is random. Judges never learn which side is new.
+- Redesign baseline (step 1): `cook/compare/baseline/*.jpg` (reference left, old site right), scored into `cook/judge/baseline/`. No `ab` key: pairs are made only for rounds.
 - The bar numbers, this prompt and the `user_bans` list from `cook/bans.json`. Nothing else.
 
 ## The prompt

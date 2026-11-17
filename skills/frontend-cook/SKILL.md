@@ -15,7 +15,7 @@ A frontend design loop that does not accept "looks good" from anyone, including 
 - **After every step:** `node <skill>/scripts/gate.mjs verify <step>`. Exit 0 or the step is not done. Fix what failed and run it again. Never write "done" before this passes.
 - `gate.mjs status` says where the run is and what is next. Run it after every context compaction, then read `cook/BRIEF.md`, `cook/SHOTS.md` and the last two entries of `cook/ROUNDS.md`, and continue. Do not restart work that passed.
 - Steps: `0` setup, `0b` baseline (redesign only), `1` references, `2` mockup, `3` bar, `4` time, `5` bans, `6a` static, `6b` motion, `7` feedback, `8` judge.
-- **The guard hook** (installed by setup into `.claude/settings.json`) enforces this even if you forget: until steps 2 to 5 passed (mockup, bar, time, bans) it blocks design code in the source folders (not tests, config, server or API code); it blocks **added** motion code (scroll reveals, long transitions, marquees) until the static design passed, so existing animation can stay and functional animation can be allowed; it blocks hand edits to `GATES.json`, `PREFLIGHT.json`, judge summaries, reports, the baseline files and the judge key, writes a second copy of a judge file, and blocks `agent-browser` outright. It logs every tool call and every user prompt to `cook/.ledger.jsonl`. That log is how the gate checks the user's words, proves the judge was a separate session and counts step 4's active time. Do not work around a block (for example by writing files through Bash): it means a step is not done.
+- **The guard hook** (installed by setup into `.claude/settings.json`) enforces this even if you forget: until steps 2 to 5 passed (mockup, bar, time, bans) it blocks design code in the source folders (not tests, config, server or API code); it blocks **added** motion code (scroll reveals, long transitions, marquees) until the static design passed, so existing animation can stay, and functional animation can be allowed with the user's words (`motion-allow`). Test files are not checked for motion, and `animation: none` resets are not motion. It also blocks hand edits to `GATES.json`, `PREFLIGHT.json`, judge summaries, reports, the baseline files and the judge key, writes a second copy of a judge file, and blocks `agent-browser` outright. It logs every tool call and every user prompt to `cook/.ledger.jsonl`. That log is how the gate checks the user's words, proves the judge was a separate session and counts step 4's active time. Do not work around a block (for example by writing files through Bash): it means a step is not done.
 
 ## Do not agree. Verify.
 
@@ -31,6 +31,7 @@ Read `references/pushback.md` once per run. In short:
 
 Requires: nothing. Do: `node <skill>/scripts/preflight.mjs --write` from the project root. If anything fails, run `/frontend-cook-setup` (or `preflight.mjs --install --write`), which installs the **cook** skill and adds the **Inspo** and **Awwwards** MCP servers. New MCP servers load only in a new session: if they were just added, tell the user to restart Claude Code and stop here.
 Then **prove the tools answer**: call one Inspo tool (`get_filters`) and one Awwwards tool (`list_categories`). If either is not in your tool list, stop: setup is not done, whatever the config file says. The ledger records these calls; step 1 checks them.
+Start Claude Code in the project folder, not a parent folder: a nested `.claude/settings.json` (the guard hook) is not loaded from a parent folder. Preflight warns when the git root differs from the folder it runs in.
 Then `gate.mjs init --project "<name>"` (marks step 0 passed when preflight passed). For an existing site use `init --mode redesign` (see below). Preflight also fails without the guard hook; if setup just added it, the session must restart for it to load. Read cook's `SKILL.md` (path in `cook/PREFLIGHT.json`): it is the loop engine. Where cook and this skill differ, this skill wins for frontend work (`references/cook-bridge.md`).
 
 ## Intake (once, before step 1)
@@ -39,7 +40,7 @@ One message, every open question, a default for each, cook-style (`<cook>/refere
 
 ## Step 0b. Baseline (redesign mode only)
 
-Requires: step 0. Read `references/redesign.md`. `node <skill>/scripts/baseline.mjs` captures the site as it is: stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion hits, and each `set-checks` result, into `cook/baseline/`. A dirty tree is refused unless the user agrees (`gate.mjs allow-dirty --quote`). Then write `cook/baseline/KEEP.md` (what must survive, what is dropped, with the user's words) and `cook/baseline/probes.json` (one check per form and toggle). Done: `gate.mjs verify 0b`.
+Requires: step 0. Read `references/redesign.md`. `node <skill>/scripts/baseline.mjs` captures the site as it is: stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion hits, and each `set-checks` result, into `cook/baseline/`. A dirty tree is refused unless the user agrees (`gate.mjs allow-dirty --quote`). Then write `cook/baseline/KEEP.md` (what must survive, what is dropped, with the user's words) and `cook/baseline/probes.json` (one probe per form and toggle, run against a dev or staging URL, never production). Run `node <skill>/scripts/baseline.mjs --probes-only` after writing the probes: `cook/baseline/probecheck.json` must show that every probe proves something. Show the user the baseline stills, then `gate.mjs approve baseline --quote "<their words>"`. Done: `gate.mjs verify 0b`.
 
 ## Step 1. Strong references
 
@@ -49,6 +50,7 @@ Requires: step 0. Read `references/references.md`.
 - Capture every reference the same way the build will be captured: `node <skill>/scripts/shoot.mjs <url> --out cook/refs --name R01 --fold`.
 - Write `cook/refs/SOURCES.md`, `cook/SHOTS.md` (what to take from each one) and a short `cook/BRIEF.md` (40 lines max) from `templates/`.
 - Send the user a contact sheet of the references and ask which to cut. Their picks beat yours.
+- Redesign: put the old site beside a reference in `cook/compare/baseline/` and score the baseline with 2+ judges in `cook/judge/baseline/` (`references/redesign.md`).
 Done: `gate.mjs verify 1`.
 
 ## Step 2. Target mockup
@@ -75,12 +77,12 @@ Done: `gate.mjs verify 4`.
 ## Step 5. Ban the slop
 
 Requires: step 4. `node <skill>/scripts/slop_scan.mjs --init` writes `cook/bans.json`. Read `references/slop.md`: the built-in bans the scanner enforces, the visual bans the judges enforce, and how the user adds their own. A ban is switched off only with the user's own words in `allowed`, and the scanner checks those words against their logged messages. Add a `Bans:` line to BRIEF.md.
-Redesign: `slop_scan.mjs src --baseline cook/baseline/slop.json --exclude <glob>`. Excluded files fail only on new slop. `verify 5` also checks that no source file changed since the baseline commit.
+Redesign: `slop_scan.mjs src --baseline cook/baseline/slop.json --exclude <glob>`. Excluded files fail only on new slop. `verify 5` also checks the design files in the source folders: none may differ from the baseline commit, changed or untracked. Design files are markup and style; tests, config, server and API code, and logic files with no markup or style are not.
 Done: `gate.mjs verify 5`.
 
 ## Step 6. Build step by step
 
-**6a Static.** Requires: step 5, and the hook blocks build code until steps 2 to 5 have passed. Build the real thing, every section, every breakpoint, no motion yet: the hook and the gate also reject added scroll reveals (IntersectionObserver, `data-aos`), transitions of 500ms or more, marquees and similar. `gate.mjs set-build --src <dir> --url <dev url or file>`. Then run rounds (below) until the static bar is met, send the stills, wait for the user's words, `gate.mjs approve static --quote "..."`. While waiting, keep refining static; do not start motion. Redesign: `gate.mjs set-strategy --in-place` (default), one round per stage: tokens, shared components, sections top to bottom, dead CSS. Rebuild only with the user's words (`--rebuild --quote`), and then port the existing logic, do not rewrite it. The first round removes decorative existing motion; functional motion stays only through `gate.mjs motion-allow <file> <hash> --reason`, after asking the user. Done: `gate.mjs verify 6a`.
+**6a Static.** Requires: step 5, and the hook blocks build code until steps 2 to 5 have passed. Build the real thing, every section, every breakpoint, no motion yet: the hook and the gate also reject added scroll reveals (IntersectionObserver, `data-aos`), transitions of 500ms or more, marquees and similar. `gate.mjs set-build --src <dir> --url <dev url or file>`. Then run rounds (below) until the static bar is met, send the stills, wait for the user's words, `gate.mjs approve static --quote "..."`. While waiting, keep refining static; do not start motion. Redesign: `gate.mjs set-strategy --in-place` (default), one round per stage: tokens, shared components, sections top to bottom, dead CSS. Rebuild only with the user's words (`--rebuild --quote`), and then port the existing logic, do not rewrite it. The first round removes decorative existing motion (`verify 6a` fails while a decorative hit from KEEP.md's Motion section is still in the code). Functional motion stays only through `gate.mjs motion-allow <file> <hash> --reason "..." --quote "<user's words>"`, after asking the user (`--text '<line>'` allows a line that is not written yet). Done: `gate.mjs verify 6a`.
 
 **6b Motion.** Requires: 6a. Read `references/motion.md`. First run `gate.mjs set-motion --refs`. Motion comes from references, never from defaults. The build must contain animation code, and every evidence file must be non-empty. The user may hand over sites or videos; take the motion out of them **with any tool or skill that works**: `shoot.mjs --live --video` recordings, ffmpeg frame-by-frame, Awwwards `get_motion_dna` / `analyze_scroll_map` / `analyze_hover_census`, or any other installed skill or tool. Save what each tool produced as `cook/refs/motion/<R or V id>-<what>.<ext>`; user videos go in `cook/refs/` as `V01.mp4`. Then `cook/MOTION.md`: 5+ effects, each citing its reference id, each with a measured duration and easing, from 2+ references. If the user wants no motion: `gate.mjs set-motion --none --quote "..."`. Done: `gate.mjs verify 6b`.
 
@@ -102,7 +104,7 @@ Requires: 6b. Read `references/feedback.md`. Every user remark becomes an inbox 
 ## Step 8. Separate judge
 
 Requires: 7. The final score comes from judges who did not build it: fresh subagents with zero context (2+), **plus a judge in a separate Claude Code session** (`/frontend-cook-judge <round>`). That separate judge must meet the bar on its own. The gate checks the guard log: a judge file must have been written by a session that never edited the build. A judge's own claim to be separate does not count. They see only the side-by-sides, the stills and the rubric. Target: the bar from step 3 after calibration. Redesign: `pair.mjs --round rNN` makes unlabeled old/new pairs; every judge must add an `ab` entry for every pair and prefer the new side in each one, and no dimension may end below its baseline. Then the user approves the final stills: `gate.mjs approve final --quote "..."`.
-Done: `gate.mjs verify 8`. Then ship: final build check, and a report with the scores, every override with the user's words, and anything still below the bar.
+Done: `gate.mjs verify 8`. Then ship: final build check, then `gate.mjs report` (writes `cook/REPORT.md`: steps, overrides with the user's words, scores, slop and audit counts, Dropped items, motion allowances), and anything still below the bar.
 
 ## Never
 
@@ -127,11 +129,11 @@ Done: `gate.mjs verify 8`. Then ship: final build check, and a report with the s
 | `references/motion.md` | Step 6b. |
 | `references/feedback.md` | Step 7, and whenever the user gives feedback. |
 | `templates/` | BRIEF, SOURCES, SHOTS, SECTIONS, MOTION, judge JSON, KEEP.md and probes (redesign). |
-| `scripts/gate.mjs` | Before and after every step. |
+| `scripts/gate.mjs` | Before and after every step; `report` for the final report. |
 | `scripts/preflight.mjs` | Step 0. |
 | `scripts/shoot.mjs` | Every capture: references, mockup, rounds. |
 | `scripts/slop_scan.mjs` | Step 5 and every round. |
-| `scripts/baseline.mjs` | Step 0b (redesign). |
+| `scripts/baseline.mjs` | Step 0b (redesign); `--probes-only` after writing the probes. |
 | `scripts/regress.mjs` | Every round (redesign): inventory diff, probes, checks. |
 | `scripts/pair.mjs` | Step 8 (redesign): unlabeled old/new pairs. |
 | `scripts/audit.mjs` | Every round. |

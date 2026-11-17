@@ -67,11 +67,11 @@ Then in Claude Code, inside your project:
 For a site that already works and should be taken from 2/10 to 9/10 without breaking it. Setup, the references and the bar are the same; the difference is that the current site is measured first and every change is checked against it.
 
 - **Init:** `gate.mjs init --project X --mode redesign --src src --exclude 'src/legacy/**' --url http://localhost:5173 --pages /,/pricing`, then `set-checks --cmd "npm test" --cmd "npm run build"`.
-- **Baseline (step 0b):** `baseline.mjs` captures the current site's stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion and check results. You and the agent write `KEEP.md` (what must stay, what is dropped, in your words) and `probes.json` (form and menu checks). A dirty git tree is refused unless you agree.
+- **Baseline (step 0b):** `baseline.mjs` captures the current site's stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion and check results. You and the agent write `KEEP.md` (what must stay, what is dropped, in your words) and `probes.json` (form and menu checks, run against a dev or staging URL, never production; `baseline.mjs --probes-only` checks that each probe proves something). You approve the baseline at step 0b, with the stills shown. A dirty git tree is refused unless you agree.
 - **Strategy:** in place by default, one stage at a time: tokens, shared components, sections top to bottom, dead CSS. A rebuild only with your words, and then the existing logic is ported, not rewritten.
 - **Every round:** `regress.mjs` diffs the page inventories against the baseline (a lost link, form field or heading fails unless `KEEP.md` names it), runs the probes and the checks.
-- **Judging:** the baseline is scored like any round. In the final round `pair.mjs` builds unlabeled old/new pairs, and every judge must prefer the new side in every pair.
-- **Final report:** before and after per dimension, slop and audit deltas, and every dropped item with your words.
+- **Judging:** the baseline is scored in step 1, like any round. In the final round `pair.mjs` builds unlabeled old/new pairs, and every judge must prefer the new side in every pair.
+- **Final report:** `gate.mjs report` writes `cook/REPORT.md`: before and after per dimension, slop and audit deltas, and every dropped item with your words.
 
 Full details: `skills/frontend-cook/references/redesign.md`.
 
@@ -85,6 +85,20 @@ Full details: `skills/frontend-cook/references/redesign.md`.
 - The hook sees Claude Code's own tools. Code written by a program Claude runs (for example a Python script that writes files) gets past the hook. The gate still scans the build for animation code and rejects stale proof, so it cannot pass a step that way, but it can write the code.
 - A subagent judge's "fresh context" cannot be proven; that is why step 8 requires a judge from a separate session, which can be proven.
 - The Awwwards MCP index is a local cache that fills over time; early searches can be thin. Inspo fills the gap.
+
+## Known limits
+
+Deliberate shell evasion is not stopped by the hook. A command written to get around it is caught at verify time instead, by the git and file checks in verify 5 and 6a. Not handled yet, on purpose:
+- Your words are matched against the prompts in the log, not against the whole conversation.
+- Your words are matched as text. The check does not read negation, so a message that contradicts a quote is not caught.
+- The guard does not follow `cd` or symlinks when it decides which folder a command touches.
+- Moving `cook/` with `mv` is allowed; it is the documented restart.
+- Probe selectors match loosely unless `"exact": true` is set.
+- Slop and motion allowances match the text of a line, so editing that line needs a new check.
+- An allowance covers every copy of a line; it cannot be limited to a count.
+- On macOS, file names that differ only by case are not treated as the same file.
+- The gate finds `cook/GATES.json` in the project root only; it does not search subfolders.
+- Writes made through an MCP filesystem server are not checked by the guard.
 
 ## License
 

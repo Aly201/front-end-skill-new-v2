@@ -10,6 +10,15 @@ Redesign mode: improve an existing site without breaking what works.
 - Guard: blocks only added animation (functional motion can be allowed with `motion-allow`), and before step 5 only design files in the source folders; baseline files and the judge key are protected.
 - Shoots every page and interactive state (`shoot.mjs --pages`, `--steps`, `--suffix`); audit URLs compare normalized.
 - Calibration re-bases correctly when a baseline round is rated.
+- Probes: `baseline.mjs --probes-only` writes `probecheck.json`, which must show every probe proving something (false before its steps, true after); verify 0b requires it. Selectors take an opt-in `"exact": true`; a probe can `"mock"` its requests.
+- Baseline: approved in step 0b with the stills shown; scored in step 1 with 2+ judges. A dirty baseline records a hash per changed file, and verify 5 ignores each one while its content still matches.
+- verify 5 checks design files only (markup and style, changed or untracked); outside a git repo it is reported as not measured. verify 6a fails while a decorative motion hit remains.
+- Motion: `motion-allow --text '<line>'` allows a line before it exists; test files are not motion-checked; `animation: none` is not motion. Every allowance needs the user's words.
+- `shoot.mjs` fails on an HTTP status of 400 or more and on a missing file page; duplicate slugs in `--pages` are rejected.
+- Slop: repeated findings are counted, so a new copy of a baselined finding is new.
+- `init --exclude` stores the pattern without a leading `./` or a trailing `/`.
+- `gate.mjs report` writes `cook/REPORT.md`.
+- Preflight warns (not fatal) when Claude Code is not started in the project's git root, where a nested `.claude/settings.json` is not loaded.
 
 ## 1.2.0
 Fixes from an independent review of 1.1.0.

@@ -18,6 +18,7 @@ node <skill>/scripts/gate.mjs set-checks --cmd "npm test" --cmd "npm run build"
 - `--src` is the folder with the design code. Repeat it for more folders. `--exclude` takes globs for code you will not restyle (legacy, vendored). Excluded files are still scanned, but only for new slop.
 - `--url` is the running dev server or the production URL of the current site.
 - `--pages` lists every page that matters. Each gets its own stills, inventory and audit. Change it later with `set-pages`.
+- `shoot.mjs` fails on an HTTP status of 400 or more, and on a missing page file. A SPA dev server answers 200 for every path, so a wrong path there is not caught by the status: check the page list by eye.
 - `set-checks` lists commands that must keep passing (tests, build, typecheck). A command that already fails on the baseline is recorded and not held against you; one that passes there must keep passing.
 
 Then run step 0 (setup) as usual.
@@ -34,7 +35,8 @@ It captures the site as it is, into `cook/baseline/`:
 - `slop.json` and `audit-<page>.json`: the starting numbers. They do not have to pass.
 - `motion.json`: every animation hit in the source folders, with a hash per line.
 - `checks.json`: the exit code of each `set-checks` command on the untouched tree.
-- `meta.json`: commit, dirty flag, time, URL and pages.
+- `probecheck.json`: each probe run once before and once after its steps (see Probes below).
+- `meta.json`: commit, dirty flag, time, URL and pages. A dirty baseline also records `dirty_files`: a hash of each changed file under `--src`.
 
 **A dirty tree is refused.** Commit or stash first. If the user wants the current working state as the baseline, get their words, then:
 
@@ -49,7 +51,7 @@ Then write two files by hand (the agent writes them, the scripts only check them
 - `## Keep`: what must still work and be visible. Quote the user where they said it.
 - `## Dropped`: each removed item, with the user's exact words in quotes. Every drop must be here, or `regress.mjs` fails it.
 - `## Copy changes`: each text change, old and new, with the user's words.
-- `## Motion`: a table with one row per hit in `motion.json`: `| file:line | hash | functional/decorative | keep/replace/remove |`. Copy the hashes from the file.
+- `## Motion`: a table with one row per hit in `motion.json`: `| file:line | hash | functional/decorative | keep/replace/remove |`. Copy the hashes from the file (12 hex characters each).
 
 **`cook/baseline/probes.json`** (template: `templates/probes.example.json`). A list of checks, one per form and one per toggle in the inventory (menu, tabs, dialog, accordion):
 
@@ -61,9 +63,17 @@ Then write two files by hand (the agent writes them, the scripts only check them
 
 Selectors are by role and name, or by label or text, never by class or DOM path. The redesign changes classes; a probe that depends on them fails for the wrong reason. Step formats: `click`, `fill`, `hover`, `press`, `wait`. Expectations: `visible`, `text`, `request`. Probes must pass on the baseline.
 
-`verify 0b` checks: stills for every page and viewport, both reports and the inventory exist, probes cover every form and toggle and pass, KEEP.md has the four headings, every motion hit is classified.
+Rules for probes:
+- **Dev or staging only.** Probes run against a dev or staging URL, never production. A probe that submits a form changes real data there.
+- **Mock the submits.** A per-probe `"mock"` fulfils matching requests in the browser, so a form submit does not reach a real backend. It is opt-in, per probe: `"mock": [{ "url": "/api/contact", "status": 200, "body": "{\"ok\":true}" }]`.
+- **Exact names where a loose match would pass a broken page.** Selectors match loosely by default. Add `"exact": true` to a selector to require the whole name (opt-in). A menu probe that must fail when the menu is broken targets `{ "role": "navigation" }` or uses `"exact": true`.
+- **Every probe must prove something.** `node <skill>/scripts/baseline.mjs --probes-only` runs each probe once before its steps and once after, and writes `cook/baseline/probecheck.json`: `[{name, page, viewport, before:[bool], after:[bool], proves}]`. `proves` is true when some expectation is false before the steps and true after. A `request` expectation counts as false before. A probe that is already true before it acts passes on any page: fix it until `proves` is true.
 
-**Score the baseline in step 1.** Once the references exist, put the old site beside a reference (reference left, old site right) in `cook/compare/baseline/`, then have 2+ fresh judges score it into `cook/judge/baseline/`, the same way as every round. Then `gate.mjs approve baseline --quote "<their words>"`. These scores are the floor for "no dimension below the baseline" at the end.
+`verify 0b` checks: stills for every page, desktop and mobile, full and folded; an audit for every page; the inventory; one probe per form, on that form's page; `probecheck.json`, newer than `probes.json`, with every probe proving something; KEEP.md has the four headings; every motion hit is classified; the baseline is approved (`approve baseline`, with the stills shown). Every round's `regress.mjs` runs the probes again.
+
+**Approve the baseline in step 0b.** Show the user the baseline stills (every page, desktop and mobile), the KEEP.md and the probes, then `gate.mjs approve baseline --quote "<their words>"`. The approval expires if the stills change.
+
+**Score the baseline in step 1.** Once the references exist, put the old site beside a reference (reference left, old site right) in `cook/compare/baseline/`, then have 2+ fresh judges score it into `cook/judge/baseline/`, the same way as every round, and run `gate.mjs score baseline`. These scores are the floor for "no dimension below the baseline" at the end.
 
 ## Step 1 (redesign)
 
@@ -87,8 +97,8 @@ node <skill>/scripts/slop_scan.mjs src --baseline cook/baseline/slop.json --excl
 
 - Inside scope, the scan is as strict as ever: zero errors.
 - Excluded files: only **new** findings fail. Old ones are listed as `remaining`; fixed ones as `fixed`.
-- `verify 5` runs a git check: `git diff --name-only <baseline commit> -- <src>` must be empty. No design file changes before step 5 passes; design work starts in 6a.
-- Before step 5 the guard lets tests, config, server and API code, and logic fixes through. The git check still lists every changed file under `--src`, so a logic fix inside a source folder fails `verify 5` until it is moved out of the source folders or the step is passed. Keep logic fixes in the source folders for 6a.
+- `verify 5` runs a git check: no design file under `--src` may differ from the baseline commit (changed or untracked). Design files are markup and style. Tests, config, server and API code, and logic files without markup or style (no JSX, class names, `styled`, `css`, `cva`, `style={{`, or a style module) are not design files. Outside a git repo the check is reported as not measured.
+- Before step 5 the guard lets tests, config, server and API code, and logic fixes through. A logic fix passes `verify 5`. A markup or style change does not: design work starts in 6a, after step 5 passes.
 
 ## Step 6a (redesign): in place, in order
 
@@ -103,8 +113,10 @@ node <skill>/scripts/slop_scan.mjs src --baseline cook/baseline/slop.json --excl
 **Motion in redesign:**
 - Guard: only **added** animation is blocked. Existing lines may stay while you restyle around them.
 - First 6a round: remove decorative existing motion (scroll reveals, counters, decorative loops, marquees). Step 6b redesigns motion from references.
-- Functional motion (loading spinners, lazy-load observers, rAF debouncing, transitions the UI depends on) stays. Ask the user first, then allow each hit:
-  `gate.mjs motion-allow src/hooks/useLazy.js <hash> --reason "lazy loading"`. The hash comes from `motion.json`, or from the Motion table.
+- Functional motion (loading spinners, lazy-load observers, rAF debouncing, transitions the UI depends on) stays. Ask the user first, then allow each hit with their words:
+  `gate.mjs motion-allow src/hooks/useLazy.js 9d0b7a44c1e2 --reason "lazy loading" --quote "<their words>"`. The hash (12 hex characters) comes from `motion.json`, or from the Motion table.
+- A line you are about to write: `gate.mjs motion-allow <file> --text '<line>' --reason "..." --quote "<their words>"` allows it before it exists.
+- Test files (`*.test.*`, `*.spec.*`, `__tests__/`) are not checked for motion. `animation: none` resets are not motion, so they need no allowance.
 
 ## Each round (redesign)
 
@@ -132,7 +144,8 @@ Judges add an `ab` list to their JSON, one entry per pair: `"ab": [{ "pair": "ab
 
 ## Final report
 
+Run `node <skill>/scripts/gate.mjs report`. It writes `cook/REPORT.md` from the gate state and the reports, and prints it. It covers the steps, the overrides with the user's words, before and after scores, slop and audit counts, the Dropped items and the motion allowances. The regress results and the `set-checks` results are in `cook/reports/` and `cook/baseline/checks.json`: cite them from there.
+
 - Before and after, per dimension: baseline judge scores against the final round.
 - Slop and audit deltas: `slop.json` and `audit-<page>.json` against the last round.
 - Every Dropped item, with the user's words.
-- The last `regress` result, and the `set-checks` results.

@@ -7,8 +7,8 @@
 //   --json      print JSON only
 //
 // Exit code 0 only when every required check passes.
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { findSkill, loadPlaywright, launchBrowser, homeDir, STATE_DIR } from './_common.mjs';
@@ -203,6 +203,19 @@ function checkGitignore() {
 }
 C.gitignore = checkGitignore();
 if (C.gitignore.warn) result.warnings.push(C.gitignore.detail);
+
+// Project folder: Claude Code loads a nested .claude/settings.json only from the folder it starts in, so a
+// session started in a parent folder runs without the guard hook. A warning only: it never makes result.ok false.
+function checkProjectFolder() {
+  const top = run('git', ['rev-parse', '--show-toplevel'], 15000);
+  if (!top.ok || !top.out) return null;
+  const gitRoot = top.out.split(/\r?\n/)[0].trim();
+  const real = (p) => { try { return realpathSync(resolve(p)); } catch { return resolve(p); } };
+  if (real(gitRoot) === real(cwd)) return null;
+  return `start Claude Code in the project folder: the git root is ${gitRoot} and this run is in ${cwd}. A nested .claude/settings.json is not loaded from a parent folder`;
+}
+const projectWarn = checkProjectFolder();
+if (projectWarn) result.warnings.push(projectWarn);
 
 // Browser: with --install, add Playwright and Chromium under ~/.frontend-cook when no Playwright is found.
 if (INSTALL && !args.has('--skip-browser') && !loadPlaywright(cwd)) {
