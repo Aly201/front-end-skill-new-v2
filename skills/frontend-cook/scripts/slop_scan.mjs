@@ -2,14 +2,20 @@
 // Scans frontend source for banned "AI-looking" patterns. Errors fail the scan.
 //
 // Usage: node slop_scan.mjs <dir-or-file>... [--out cook/reports/slop-r03.json] [--bans cook/bans.json] [--json]
+//                           [--baseline cook/baseline/slop.json] [--exclude <glob>]...
 //        node slop_scan.mjs --init [--bans cook/bans.json]   write the default bans file
+//
+// --baseline: an earlier slop report. Each finding is fingerprinted as id|file|text (no line number),
+//   so findings already in the baseline are "remaining" and only new ones are "is_new".
+// --exclude: a glob (relative to the current directory, '/' separators). Excluded files are still
+//   scanned; their findings are out of scope, so they fail the scan only when they are new.
 //
 // The bans file can switch a rule off only with the user's own words:
 //   { "allowed": [ { "id": "em-dash", "quote": "em dashes are fine in the blog copy" } ],
 //     "extra":   [ { "id": "no-blue", "pattern": "#0000ff", "flags": "i", "message": "no pure blue" } ] }
 import { readFileSync, writeFileSync, mkdirSync, statSync, existsSync } from 'node:fs';
-import { dirname, extname, relative, resolve } from 'node:path';
-import { walk, isMain, MOTION_CODE, projectRoot, userSaid } from './_common.mjs';
+import { dirname, extname, relative, resolve, sep } from 'node:path';
+import { walk, isMain, MOTION_CODE, projectRoot, userSaid, globToRe } from './_common.mjs';
 
 const MARKUP = ['.html', '.htm', '.jsx', '.tsx', '.vue', '.svelte', '.astro', '.md', '.mdx'];
 const SCRIPT = ['.js', '.mjs', '.cjs', '.ts'];
@@ -275,7 +281,17 @@ function loadBans(path) {
 
 const finding = (r, file, line, hit) => ({ id: r.id, severity: r.sev, file, line, text: String(hit).slice(0, 80), message: r.msg });
 
-export function scan(targets, bansPath) {
+// File path relative to root with '/' separators. Project-level findings keep '(project)'.
+const PROJECT = '(project)';
+const relPath = (file, root) => (file === PROJECT ? PROJECT : relative(root, resolve(root, file)).split(sep).join('/'));
+const fingerprintOf = (f, root) => `${f.id}|${relPath(f.file, root)}|${f.text}`;
+const uniq = (xs) => [...new Set(xs)];
+
+// opts: { baseline: report object or null, baselinePath: path shown in the report, exclude: [globs], cwd }
+export function scan(targets, bansPath, opts = {}) {
+  const cwd = resolve(opts.cwd || process.cwd());
+  const exclude = (opts.exclude || []).map((g) => String(g).replace(/\\/g, '/').replace(/^\.\//, ''));
+  const excludeRes = exclude.map(globToRe);
   const bans = loadBans(bansPath);
   const allowed = new Map();
   const findings = [];
@@ -363,9 +379,26 @@ export function scan(targets, bansPath) {
   if (named.length > 3 && !allowed.has('font-sprawl')) {
     findings.push({ id: 'font-sprawl', severity: 'warn', file: '(project)', line: 0, text: named.join(', '), message: 'More than 3 named typefaces.' });
   }
+  // Fingerprints, scope and novelty. Project-level findings are always in scope.
+  const base = opts.baseline && Array.isArray(opts.baseline.findings) ? opts.baseline : null;
+  const baseSet = base ? new Set(base.findings.map((b) => b.fingerprint || fingerprintOf(b, resolve(base.cwd || cwd)))) : null;
+  for (const f of findings) {
+    f.fingerprint = fingerprintOf(f, cwd);
+    f.in_scope = f.file === PROJECT || !excludeRes.some((re) => re.test(relPath(f.file, cwd)));
+    f.is_new = baseSet ? !baseSet.has(f.fingerprint) : true;
+  }
+  const newFp = uniq(findings.filter((f) => f.is_new).map((f) => f.fingerprint));
+  const remaining = uniq(findings.filter((f) => !f.is_new).map((f) => f.fingerprint));
+  const current = new Set(findings.map((f) => f.fingerprint));
+  const fixed = baseSet ? [...baseSet].filter((fp) => !current.has(fp)) : [];
+
   const errors = findings.filter((x) => x.severity === 'error').length;
-  return { ok: errors === 0 && files.length > 0, scanned: files.length, errors, warnings: findings.length - errors,
-    allowed_by_user: [...allowed.entries()].map(([id, quote]) => ({ id, quote })), findings, at: new Date().toISOString() };
+  // An error fails when it is in scope, or when it is new (an excluded error that already existed does not fail).
+  const failing = findings.some((x) => x.severity === 'error' && (x.in_scope || x.is_new));
+  return { ok: !failing && files.length > 0, scanned: files.length, errors, warnings: findings.length - errors,
+    allowed_by_user: [...allowed.entries()].map(([id, quote]) => ({ id, quote })),
+    baseline: opts.baselinePath || null, exclude, new: newFp, fixed, remaining,
+    findings, cwd, at: new Date().toISOString() };
 }
 
 export const DEFAULT_BANS = {
@@ -388,18 +421,29 @@ if (isMain(import.meta.url)) {
     console.log(`wrote ${p}`);
     process.exit(0);
   }
-  const skip = new Set(['--out', '--bans']);
+  const skip = new Set(['--out', '--bans', '--baseline', '--exclude']);
   const targets = argv.filter((a, i) => !a.startsWith('--') && !skip.has(argv[i - 1]));
-  if (!targets.length) { console.error('usage: node slop_scan.mjs <dir-or-file>... [--out report.json] [--bans cook/bans.json] [--json]'); process.exit(2); }
-  const report = scan(targets, bansPath);
+  if (!targets.length) { console.error('usage: node slop_scan.mjs <dir-or-file>... [--out report.json] [--bans cook/bans.json] [--baseline report.json] [--exclude <glob>]... [--json]'); process.exit(2); }
+  const baselinePath = opt('--baseline');
+  let baseline = null;
+  if (baselinePath) {
+    try { baseline = JSON.parse(readFileSync(baselinePath, 'utf8')); } catch (e) { console.error(`cannot read --baseline ${baselinePath}: ${e.message}`); process.exit(2); }
+  }
+  const exclude = argv.flatMap((a, i) => (a === '--exclude' && argv[i + 1] !== undefined ? [argv[i + 1]] : []));
+  const report = scan(targets, bansPath, { baseline, baselinePath, exclude, cwd: process.cwd() });
   report.targets = targets.map((t) => resolve(t));
   const out = opt('--out');
   if (out) { mkdirSync(dirname(out), { recursive: true }); writeFileSync(out, JSON.stringify(report, null, 2) + '\n'); }
   if (argv.includes('--json')) console.log(JSON.stringify(report, null, 2));
   else {
-    for (const f of report.findings) console.log(`${f.severity.toUpperCase().padEnd(5)} ${f.id.padEnd(17)} ${relative(process.cwd(), f.file) || f.file}:${f.line}  ${f.text}  -> ${f.message}`);
+    for (const f of report.findings) {
+      const tags = [baselinePath && f.is_new ? 'NEW' : '', f.in_scope ? '' : 'EXCLUDED'].filter(Boolean).join(' ');
+      console.log(`${f.severity.toUpperCase().padEnd(5)} ${f.id.padEnd(17)} ${relative(process.cwd(), f.file) || f.file}:${f.line}  ${f.text}  -> ${f.message}${tags ? `  [${tags}]` : ''}`);
+    }
     for (const a of report.allowed_by_user) console.log(`ALLOW ${a.id.padEnd(17)} user said: "${a.quote}"`);
-    console.log(`\n${report.ok ? 'CLEAN' : 'SLOP FOUND'}: ${report.errors} errors, ${report.warnings} warnings in ${report.scanned} files${out ? `. Report: ${out}` : ''}`);
+    console.log(`\n${report.ok ? 'CLEAN' : 'SLOP FOUND'}: ${report.errors} errors, ${report.warnings} warnings in ${report.scanned} files`);
+    console.log(`Baseline: ${report.new.length} new, ${report.fixed.length} fixed, ${report.remaining.length} remaining${baselinePath ? '' : ' (no --baseline: every finding is new)'}`);
+    if (out) console.log(`Report: ${out}`);
     if (!report.scanned) console.log('Nothing was scanned: check the path.');
   }
   process.exit(report.ok ? 0 : 1);
