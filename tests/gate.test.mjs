@@ -3,12 +3,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, readFileSync, realpathSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, readFileSync, realpathSync, existsSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { randomBytes } from 'node:crypto';
-import { lineHash } from '../skills/frontend-cook/scripts/_common.mjs';
+import { lineHash, pageUrl } from '../skills/frontend-cook/scripts/_common.mjs';
 
 const SCRIPTS = resolve(import.meta.dirname, '..', 'skills', 'frontend-cook', 'scripts');
 const GATE = join(SCRIPTS, 'gate.mjs');
@@ -474,7 +474,7 @@ function redesignProject() {
   write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
   write(join(d, 'site', 'index.html'), page('<h1>Rope for boats</h1><form><label>Email <input name="email"></label><button>Send</button></form>'));
   write(join(d, 'site', 'app.css'), `${HIT_LINE}\nh1 { color: #111; }\n`);
-  assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'redesign', '--src', 'site', '--url', 'http://localhost:5173', '--pages', '/,/pricing']).code, 0);
+  assert.equal(runGate(d, ['init', '--project', 'R', '--mode', 'redesign', '--src', 'site', '--exclude', 'site/legacy/**', '--url', 'http://localhost:5173', '--pages', '/,/pricing']).code, 0);
   return d;
 }
 // The baseline files the scripts write (baseline.mjs), for every page, except the named stills.
@@ -584,14 +584,17 @@ test('redesign: step 0b refuses each missing piece of the baseline, then passes'
   assert.match(v().out, /stills changed after the approval/);
 });
 
-test('redesign: motion-allow needs a real hash and a reason; set-strategy --rebuild and allow-dirty need the user words', () => {
+test('redesign: motion-allow needs a real hash, a reason and the user words; set-strategy --rebuild and allow-dirty need the user words', () => {
   const d = redesignProject();
   const G = () => JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
   assert.equal(runGate(d, ['motion-allow', 'site/app.css', '000000000000', '--reason', 'spinner']).code, 2, 'a hash not in the file is refused');
   assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH]).code, 2, 'a reason is required');
   assert.equal(runGate(d, ['motion-allow', 'site/missing.css', HIT_HASH, '--reason', 'x']).code, 2, 'the file must exist');
-  assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH, '--reason', 'loading spinner']).code, 0);
-  assert.deepEqual(G().motion_allow, [{ file: 'site/app.css', hash: HIT_HASH, reason: 'loading spinner' }]);
+  assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH, '--reason', 'loading spinner']).code, 2, 'the user words are required');
+  assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH, '--reason', 'loading spinner', '--quote', 'the spinner must stay forever']).code, 2, 'words not typed are refused');
+  say('the spinner must stay forever', d);
+  assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH, '--reason', 'loading spinner', '--quote', 'the spinner must stay forever']).code, 0);
+  assert.deepEqual(G().motion_allow, [{ file: 'site/app.css', hash: HIT_HASH, reason: 'loading spinner', quote: 'the spinner must stay forever' }]);
 
   assert.equal(runGate(d, ['set-strategy', '--rebuild']).code, 2, 'rebuild needs the user words');
   assert.equal(runGate(d, ['set-strategy', '--rebuild', '--quote', 'rewrite it from scratch']).code, 2, 'words not typed are refused');
@@ -662,4 +665,204 @@ test('redesign: set-bar stores the baseline rule, and verify 3 reports it once t
   judges('baseline', 9.0, d);
   assert.equal(runGate(d, ['score', 'baseline']).code, 0);
   assert.match(runGate(d, ['verify', '3']).out, /PASS {2}no dimension may end below the baseline \(baseline overall 8\.9/);
+});
+
+// ---- redesign mode: verify 5, 6a, 6b, per-page evidence, verify 8 and the final report ----
+const git = (d, ...args) => spawnSync('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: d, encoding: 'utf8' });
+// A git repo with a design folder (src), committed as the baseline, then a redesign project on it.
+function gitRedesign() {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-git-')));
+  write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  write(join(d, 'src', 'App.jsx'), 'export default function App() { return <h1>Rope</h1>; }\n');
+  write(join(d, 'src', 'lib', 'x.js'), 'export const x = 1;\n');
+  write(join(d, 'src', 'App.test.jsx'), "test('app', () => {});\n");
+  git(d, 'init', '-q');
+  git(d, 'add', '-A');
+  git(d, '-c', 'user.name=test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'baseline');
+  const commit = git(d, 'rev-parse', 'HEAD').stdout.trim();
+  assert.match(commit, /^[0-9a-f]{40}$/);
+  assert.equal(runGate(d, ['init', '--project', 'G', '--mode', 'redesign', '--src', 'src', '--url', 'http://localhost:5173']).code, 0);
+  const G = join(d, 'cook', 'GATES.json');
+  const g = JSON.parse(readFileSync(G, 'utf8'));
+  g.baseline = { commit, dirty: false, at: new Date().toISOString() };
+  write(G, JSON.stringify(g));
+  return d;
+}
+function slopRun(d, args) {
+  return spawnSync(process.execPath, [join(SCRIPTS, 'slop_scan.mjs'), ...args], { cwd: d, encoding: 'utf8' }).status;
+}
+// A round r for DIRS: stills, a side-by-side, the slop scan run the redesign way, one audit per page and
+// (optionally) a regress report. Judges and the A/B key are written by the tests that need them.
+function redesignRound(d, r, { regress = true } = {}) {
+  mkdirSync(join(d, 'cook', 'judge', r), { recursive: true }); // a round exists once its judge folder does (pair.mjs makes it)
+  for (const p of DIRS) for (const vp of ['desktop', 'mobile']) png(join(d, 'cook', 'stills', r, `${slugOf(p)}-${vp}.png`), vp === 'desktop' ? 1440 : 780, 900);
+  write(join(d, 'cook', 'compare', r, 'all.jpg'), 'x');
+  slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', `cook/reports/slop-${r}.json`]);
+  for (const p of DIRS) write(join(d, 'cook', 'reports', `audit-${r}-${slugOf(p)}.json`), JSON.stringify({ ok: true, url: pageUrl('http://localhost:5173', p), errors: 0 }));
+  if (regress) write(join(d, 'cook', 'reports', `regress-${r}.json`), JSON.stringify({ ok: true, errors: 0, warnings: 0, url: 'http://localhost:5173', pages: DIRS, findings: [], probes: [], checks: [], at: new Date().toISOString() }));
+}
+const NEW_SIDE = (k) => k.new;
+const OLD_SIDE = (k) => (k.new === 'left' ? 'right' : 'left');
+const AB_KEY = [{ pair: 'ab-1', page: '/', viewport: 'desktop', new: 'right' }, { pair: 'ab-2', page: '/pricing', viewport: 'mobile', new: 'left' }];
+const pickAll = (pick, keys = AB_KEY) => keys.map((k) => ({ pair: k.pair, better: pick(k), why: 'the new side reads better' }));
+// Two judges, each with an ab list: judge-a is a builder subagent, judge-b a separate session.
+function judgesAB(d, r, overall, abA, abB = abA) {
+  writeJudge(d, r, 'judge-a.json', { ...judgeDoc('A', overall, 'm1'), ab: abA }, 'builder', 'sub-1');
+  writeJudge(d, r, 'judge-b.json', { ...judgeDoc('B', overall - 0.2, 'm2'), session: 'separate', ab: abB }, 'judge-session', null);
+}
+const lineWith = (out, re) => out.split('\n').find((l) => re.test(l)) || '';
+
+test('redesign: motion-allow needs the user words; an allowed line is no longer animation; comment lines do not count', () => {
+  const d = redesignProject();
+  write(join(d, 'site', 'notes.js'), '// animation: spin 1s linear infinite\nexport const n = 1;\n');
+  const anim = () => lineWith(runGate(d, ['verify', '6b']).out, /animation code in the build|the build has no animation code yet/);
+  assert.match(anim(), /PASS {2}animation code in the build: site\/app\.css:1$/);
+  assert.doesNotMatch(anim(), /notes\.js/, 'a comment line is not animation code');
+  say('the spinner must stay forever', d);
+  assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH, '--reason', 'loading spinner', '--quote', 'the spinner must stay forever']).code, 0);
+  assert.match(anim(), /FAIL {2}the build has no animation code yet/, 'an allowed line does not count');
+});
+
+test('redesign: verify 5 refuses design file changes after the baseline commit, and ignores logic and test files', () => {
+  assert.match(runGate(redesignProject(), ['verify', '5']).out, /PASS {2}design files vs the baseline commit: not measured: not a git repo/);
+  const d = gitRedesign();
+  const line = () => lineWith(runGate(d, ['verify', '5']).out, /design files/);
+  assert.match(line(), /PASS {2}design files vs the baseline commit: none changed \(0 file\(s\)/);
+  write(join(d, 'src', 'lib', 'x.js'), 'export const x = 2;\n');
+  write(join(d, 'src', 'App.test.jsx'), "test('app', () => { expect(1).toBe(1); });\n");
+  assert.match(line(), /PASS {2}design files vs the baseline commit: none changed \(2 file\(s\) in scope changed, none of them design\)/);
+  write(join(d, 'src', 'App.jsx'), 'export default function App() { return <h1>Rope for boats</h1>; }\n');
+  assert.match(line(), /FAIL {2}design files changed before the mockup passed: src\/App\.jsx$/);
+  write(join(d, 'src', 'Hero.jsx'), 'export const Hero = () => null;\n');
+  assert.match(line(), /design files changed before the mockup passed: src\/App\.jsx, src\/Hero\.jsx$/, 'an untracked design file counts');
+});
+
+test('redesign: the step 5 slop scan and every round need the baseline and the excludes, over every source folder', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  const v5 = () => runGate(d, ['verify', '5']).out;
+  slopRun(d, ['site', '--out', 'cook/reports/slop-step5.json']);
+  assert.match(v5(), /FAIL {2}slop scan of the source folders \(step 5\): run slop_scan\.mjs with --baseline cook\/baseline\/slop\.json/, 'no --baseline is refused');
+  slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--out', 'cook/reports/slop-step5.json']);
+  assert.match(v5(), /FAIL {2}slop scan of the source folders \(step 5\): run slop_scan\.mjs with --exclude site\/legacy\/\*\*/, 'the exclude globs are required');
+  slopRun(d, ['site/index.html', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', 'cook/reports/slop-step5.json']);
+  assert.match(v5(), /FAIL {2}slop scan of the source folders \(step 5\): the slop report does not scan every source folder \(missing site/, 'one file is not the folder');
+  slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', 'cook/reports/slop-step5.json']);
+  assert.doesNotMatch(v5(), /slop scan of the source folders \(step 5\): run slop_scan/);
+  assert.match(v5(), /slop scan of the source folders \(step 5\)/);
+
+  // Every round is held to the same rule.
+  redesignRound(d, 'r01');
+  assert.doesNotMatch(runGate(d, ['verify', '6a']).out, /r01 slop scan: run slop_scan/);
+  slopRun(d, ['site', '--out', 'cook/reports/slop-r01.json']);
+  assert.match(runGate(d, ['verify', '6a']).out, /FAIL {2}r01 slop scan: run slop_scan\.mjs with --baseline cook\/baseline\/slop\.json/);
+});
+
+test('redesign: 6a needs a strategy, a passing regress report, and no decorative motion left in the code', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  write(join(d, 'cook', 'baseline', 'KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`));
+  redesignRound(d, 'r01', { regress: false });
+  judges('r01', 9.6, d);
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  const v6a = () => runGate(d, ['verify', '6a']).out;
+  assert.match(v6a(), /FAIL {2}strategy not set/);
+  assert.equal(runGate(d, ['set-strategy', '--in-place']).code, 0);
+  assert.match(v6a(), /FAIL {2}r01 regress report missing \(cook\/reports\/regress-r01\.json\)/);
+  const regress = (ok, errors) => write(join(d, 'cook', 'reports', 'regress-r01.json'), JSON.stringify({ ok, errors, warnings: 0, url: 'http://localhost:5173', pages: DIRS, findings: [], probes: [], checks: [], at: new Date().toISOString() }));
+  regress(false, 2);
+  assert.match(v6a(), /FAIL {2}r01 regress: 2 errors/);
+  regress(true, 0);
+  assert.match(v6a(), /PASS {2}r01 regress: clean/);
+  assert.match(v6a(), /FAIL {2}decorative motion still in the code.*site\/app\.css:1/, 'the decorative line must go');
+  write(join(d, 'site', 'app.css'), 'h1 { color: #111; }\n');
+  assert.match(v6a(), /PASS {2}no decorative motion left in the code/);
+});
+
+test('redesign: every page needs its own stills and audit; a trailing slash in an audit URL is the same URL', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  redesignRound(d, 'r01');
+  const v6a = () => runGate(d, ['verify', '6a']).out;
+  assert.match(v6a(), /PASS {2}r01 \/pricing audit: clean/);
+  rmSync(join(d, 'cook', 'stills', 'r01', 'pricing-desktop.png'));
+  assert.match(v6a(), /FAIL {2}r01 \/pricing desktop still missing \(cook\/stills\/r01\/pricing-desktop\.png\)/);
+  png(join(d, 'cook', 'stills', 'r01', 'pricing-desktop.png'), 1440, 900);
+  assert.match(v6a(), /PASS {2}r01 \/pricing desktop still is newer/);
+  write(join(d, 'cook', 'reports', 'audit-r01-pricing.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/pricing/', errors: 0 }));
+  assert.match(v6a(), /PASS {2}r01 \/pricing audit: clean/, 'the trailing slash is not a different page');
+  write(join(d, 'cook', 'reports', 'audit-r01-pricing.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/', errors: 0 }));
+  assert.match(v6a(), /FAIL {2}r01 \/pricing audit: the audit ran on http:\/\/localhost:5173\/, not the build/);
+  rmSync(join(d, 'cook', 'reports', 'audit-r01-home.json'));
+  assert.match(v6a(), /FAIL {2}r01 \/ audit report missing \(cook\/reports\/audit-r01-home\.json\)/);
+});
+
+test('redesign: verify 8 old against new: a key, a choice on the new side in every judge, and no dimension below the baseline', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  judges('baseline', 9.0, d);
+  assert.equal(runGate(d, ['score', 'baseline']).code, 0);
+  redesignRound(d, 'r01');
+  const v8 = () => runGate(d, ['verify', '8']).out;
+  judgesAB(d, 'r01', 9.6, pickAll(NEW_SIDE));
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  assert.match(v8(), /FAIL {2}no A\/B key for r01: run pair\.mjs --round r01/);
+
+  write(join(d, 'cook', 'judge', 'r01', '.abkey.json'), JSON.stringify(AB_KEY));
+  // judge-a prefers the old side in ab-1; judge-b leaves ab-2 out.
+  judgesAB(d, 'r01', 9.6, pickAll((k) => (k.pair === 'ab-1' ? OLD_SIDE(k) : NEW_SIDE(k))), pickAll(NEW_SIDE, AB_KEY.slice(0, 1)));
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  let out = v8();
+  assert.match(out, /FAIL {2}judge-a\.json: prefers the old site in ab-1 \(\/ desktop\)/);
+  assert.match(out, /FAIL {2}judge-b\.json: no ab entry for ab-2 \(\/pricing mobile\)/);
+  assert.doesNotMatch(out, /abkey/, 'the key is not a judge file');
+
+  judgesAB(d, 'r01', 9.6, pickAll(NEW_SIDE));
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  out = v8();
+  assert.match(out, /PASS {2}judge-a\.json: every A\/B pair \(2\) chooses the new side/);
+  assert.match(out, /PASS {2}judge-b\.json: every A\/B pair \(2\) chooses the new side/);
+  assert.match(out, /PASS {2}no dimension below the baseline/);
+  assert.doesNotMatch(out, /abkey/);
+});
+
+test('redesign: verify 8 refuses a round where a dimension ends below the baseline', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  judges('baseline', 9.0, d);
+  assert.equal(runGate(d, ['score', 'baseline']).code, 0);
+  redesignRound(d, 'r01');
+  write(join(d, 'cook', 'judge', 'r01', '.abkey.json'), JSON.stringify(AB_KEY));
+  judgesAB(d, 'r01', 8.0, pickAll(NEW_SIDE));
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  assert.match(runGate(d, ['verify', '8']).out, /FAIL {2}below the baseline in cook\/judge\/r01\/summary\.json: layout 7\.9 \(baseline 8\.9\)/);
+});
+
+test('redesign: report writes cook/REPORT.md with the before and after table, Dropped lines and motion allowances', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  write(join(d, 'cook', 'baseline', 'KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | functional | keep |`, '- Hero video: the user said "drop the hero video"'));
+  say('the spinner must stay forever', d);
+  assert.equal(runGate(d, ['motion-allow', 'site/app.css', HIT_HASH, '--reason', 'loading spinner', '--quote', 'the spinner must stay forever']).code, 0);
+  judges('baseline', 9.0, d);
+  assert.equal(runGate(d, ['score', 'baseline']).code, 0);
+  redesignRound(d, 'r01');
+  judges('r01', 9.6, d);
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  const r = runGate(d, ['report']);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /Written to cook\/REPORT\.md/);
+  const md = readFileSync(join(d, 'cook', 'REPORT.md'), 'utf8');
+  assert.match(md, /\| Dimension \| Baseline \| r01 \| Change \|/);
+  assert.match(md, /\| color \| 8\.9 \| 9\.5 \| \+0\.6 \|/);
+  assert.match(md, /## Slop/);
+  assert.match(md, /\| Page \| Baseline \| r01 \|/);
+  assert.match(md, /- Hero video: the user said "drop the hero video"/);
+  assert.match(md, /site\/app\.css [0-9a-f]{12}: loading spinner\. The user said: "the spinner must stay forever"/);
+
+  const n = newProject();
+  assert.equal(runGate(n, ['report']).code, 0);
+  const mdNew = readFileSync(join(n, 'cook', 'REPORT.md'), 'utf8');
+  assert.match(mdNew, /## Steps/);
+  assert.doesNotMatch(mdNew, /Before and after/);
 });

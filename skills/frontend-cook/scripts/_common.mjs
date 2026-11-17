@@ -165,7 +165,7 @@ export function isMain(metaUrl) {
 // Animation code. Banned in the mockup and the static build (step 6a), allowed from step 6b.
 // Hover and focus transitions are allowed in static: they are states, not animation.
 // The last alternative catches transitions of 500ms or longer (hover and focus transitions are shorter).
-export const MOTION_CODE = /@keyframes|\banimation(?:-name)?\s*:|\bgsap\b|framer-motion|['"]motion\/react['"]|\bfrom\s+['"]motion['"]|\banimate-(?!none\b)[a-z]|\blenis\b|ScrollTrigger|useSpring|\.animate\(\s*[\[{]|\bview-timeline|\bscroll-timeline|animation-timeline|IntersectionObserver|requestAnimationFrame|data-aos|<marquee|['"]animejs['"]|\banime\(|react-spring|locomotive-scroll|tailwindcss-animate|\bwhileInView\b|\bwhileHover\b|<motion\.|\btransition(?:-duration)?\s*:[^;}]*?(?:\s|:|,)(?:[5-9]\d\dms|[1-9]\d{3,}ms|0?\.[5-9]\d*s|[1-9][\d.]*s)\b/;
+export const MOTION_CODE = /@keyframes|\banimation(?:-name|Name|Duration)?\s*:(?!\s*["']?none\b)|\bgsap\b|framer-motion|['"]motion\/react['"]|\bfrom\s+['"]motion['"]|\banimate-(?!none\b)[a-z]|\blenis\b|ScrollTrigger|useSpring|\.animate\(|\bview-timeline|\bscroll-timeline|animation-timeline|IntersectionObserver|requestAnimationFrame|data-aos|<marquee|['"]animejs['"]|\banime\(|react-spring|locomotive-scroll|tailwindcss-animate|\bwhileInView\b|\bwhileHover\b|<motion\.|\btransition(?:-duration)?\s*:[^;}]*?(?:\s|:|,)(?:[5-9]\d\dms|[1-9]\d{3,}ms|0?\.[5-9]\d*s|[1-9][\d.]*s)\b/;
 export const FRONTEND_EXT = ['.html', '.htm', '.css', '.scss', '.sass', '.less', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.mdx'];
 
 // The activity ledger the guard hook writes: one JSON object per line.
@@ -182,7 +182,9 @@ const normWords = (s) => String(s).toLowerCase().replace(/[“”"'‘’`]/g, '
 export function userSaid(root, quote) {
   const q = normWords(quote);
   if (!q) return false;
-  return readLedger(root).some((e) => e.tool === 'UserPrompt' && normWords(e.prompt || '').includes(q));
+  // Whole words only: "it" must not match inside "edit".
+  const re = new RegExp(`(^|[^\\p{L}\\p{N}])${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\p{L}\\p{N}])`, 'u');
+  return readLedger(root).some((e) => e.tool === 'UserPrompt' && re.test(normWords(e.prompt || '')));
 }
 
 // Hours of real activity: gaps between tool calls of up to `gapMin` minutes count, longer gaps
@@ -205,7 +207,14 @@ export function lineHash(text) {
 
 const PROSE_EXT = ['.md', '.mdx', '.txt'];
 // Lines that are only a comment do not count as motion code.
-function isCommentLine(t) { return /^(\/\/|\/\*|\*|<!--|#\s)/.test(t.trim()); }
+// Stateless (edit snippets can start mid-comment): strip inline /*...*/, then a line is a comment when
+// it starts with // <!-- or "# ", or starts with * or /* and has no CSS/JS punctuation ({ } ;) left.
+function isCommentLine(t) {
+  const x = String(t).replace(/\/\*.*?\*\//g, '').trim();
+  if (!x) return true;
+  if (/^(\/\/|<!--|#\s)/.test(x)) return true;
+  return /^(\*|\/\*)/.test(x) && !/[{};]/.test(x);
+}
 
 // Every animation-code line in a text: [{ line (1-based), text, hash }]. Prose files and comment
 // lines are skipped. ext is the file extension including the dot ('' = treat as code).
@@ -214,7 +223,7 @@ export function motionHits(text, ext = '') {
   const out = [];
   String(text || '').split('\n').forEach((l, i) => {
     if (!l.trim() || isCommentLine(l)) return;
-    if (MOTION_CODE.test(l)) out.push({ line: i + 1, text: l.trim().slice(0, 160), hash: lineHash(l) });
+    if (MOTION_CODE.test(l.replace(/\/\*.*?\*\//g, ''))) out.push({ line: i + 1, text: l.trim().slice(0, 160), hash: lineHash(l) });
   });
   return out;
 }
@@ -277,16 +286,45 @@ export function readGates(root) { return readJson(join(root, STATE_DIR, 'GATES.j
 const DESIGN_SKIP = /(^|\/)(node_modules|dist|build|\.next|\.astro|\.svelte-kit|\.git)\//;
 const LOGIC_EXT = ['.js', '.mjs', '.cjs', '.ts'];
 const NOT_DESIGN = [/(^|\/)[^/]*\.(test|spec)\.[^/]*$/i, /(^|\/)[^/]*\.config\.[^/]*$/i, /(^|\/)__tests__\//, /(^|\/)(server|api)\//];
-export function isDesignFile(rel, gates = {}) {
+// Exclude patterns: a glob, or a plain folder ('src/legacy', 'src/legacy/', './src/legacy') meaning
+// that folder and everything under it.
+export function excludeRe(pattern) {
+  let g = String(pattern).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+  if (!/[*?]/.test(g)) g = `${g}/**`;
+  const re = globToRe(g);
+  const base = g.replace(/\/\*\*$/, '');
+  return { test: (rel) => re.test(rel) || rel === base };
+}
+export function isExcluded(rel, patterns = []) {
+  rel = String(rel).replace(/\\/g, '/').replace(/^\.\//, '');
+  return (Array.isArray(patterns) ? patterns : []).some((p) => excludeRe(p).test(rel));
+}
+
+// Logic-extension files that are really design: style modules by name, or JSX / class names /
+// styled / cva by content (narrow on purpose: it must not flag ordinary logic files).
+const STYLE_MODULE = /\.(css|styles?)\.[cm]?[jt]s$/i;
+const DESIGN_CONTENT = /(return\s*\(?\s*<[A-Za-z>]|=>\s*\(?\s*<[A-Za-z>]|\bclassName\s*=\s*["'{]|\bstyled(\.[a-z]+|\([A-Z]\w*\))`|\bcss`|\bcva\(|\bstyle\s*=\s*\{\{)/;
+export function looksLikeDesign(rel, text) {
+  return STYLE_MODULE.test(String(rel)) || (typeof text === 'string' && DESIGN_CONTENT.test(text));
+}
+
+// text: the file content to judge logic-extension files by (guard: content on disk plus the new text;
+// gate: content on disk). In mode "new" every frontend file is design, as before.
+export function isDesignFile(rel, gates = {}, text = null) {
   rel = String(rel).replace(/\\/g, '/');
   const ext = extname(rel).toLowerCase();
   if (rel.startsWith('cook/mockup/') || rel.startsWith('cook/refs/')) return false;
   if (!FRONTEND_EXT.includes(ext) || DESIGN_SKIP.test(rel)) return false;
-  if (LOGIC_EXT.includes(ext) || NOT_DESIGN.some((re) => re.test(rel))) return false;
-  const exclude = (Array.isArray(gates?.scope?.exclude) ? gates.scope.exclude : []).map((x) => globToRe(x));
-  if (exclude.some((re) => re.test(rel))) return false;
+  if (NOT_DESIGN.some((re) => re.test(rel))) return false;
+  if (LOGIC_EXT.includes(ext) && gates?.mode === 'redesign' && !looksLikeDesign(rel, text)) return false;
+  if (isExcluded(rel, gates?.scope?.exclude)) return false;
   const src = (Array.isArray(gates?.scope?.src) ? gates.scope.src : [])
     .map((x) => String(x).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean);
   if (src.length) return src.some((x) => rel === x || rel.startsWith(`${x}/`));
   return true;
 }
+
+// Step order, shared by gate.mjs and the guard's per-prompt reminder.
+export const STEPS_NEW = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
+export const STEPS_REDESIGN_ORDER = ['0', '0b', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
+export const STEP_SHORT_NAMES = { 0: 'setup', '0b': 'baseline', 1: 'references', 2: 'mockup', 3: 'bar', 4: 'time', 5: 'bans', '6a': 'static build', '6b': 'motion', 7: 'feedback', 8: 'separate judge' };

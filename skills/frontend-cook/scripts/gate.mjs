@@ -11,7 +11,8 @@
 //   set-pages /,/pricing                  pages that matter (each gets stills, inventory, audit)
 //   set-checks --cmd "npm test" [--cmd ...]   commands that must keep passing (replaces the list)
 //   set-strategy --in-place | --rebuild --quote "<user words>"
-//   motion-allow <file> <hash> --reason "..."   allow one existing animation line (hash from motion.json)
+//   motion-allow <file> <hash> --reason "..." --quote "<user words>"
+//                                         allow one existing animation line (hash from motion.json)
 //   allow-dirty --quote "<user words>"    the baseline may be taken on a dirty tree
 //   status                                every step, its state and the next step
 //   check <step>                          may this step start? (previous steps passed, inputs present)
@@ -29,6 +30,8 @@
 //   score <round>                         median of the judge files in cook/judge/<round>/, calibrated
 //   calibrate --user <score 0-10> --quote "<user's words with that number>"
 //   elapsed                               hours since the timer started
+//   report                                final report, written to cook/REPORT.md (steps, overrides, redesign
+//                                         before and after, slop and audit counts, Dropped, motion allowances)
 //
 // Steps: 0 setup, 1 references, 2 mockup, 3 bar, 4 time, 5 bans, 6a static build,
 //        6b motion, 7 feedback, 8 separate judge.
@@ -36,7 +39,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSy
 import { join, resolve, extname, basename, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
-import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, MOTION_CODE, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, pageSlug } from './_common.mjs';
+import { spawnSync } from 'node:child_process';
+import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, unallowedMotion, pageSlug, pageUrl, normUrl, isDesignFile, globToRe } from './_common.mjs';
 
 export const STEPS = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 // An existing site (mode redesign) starts with the baseline, step 0b.
@@ -121,6 +125,17 @@ function srcFiles(g) {
   if (!g.build?.src) return [];
   return walk(resolve(root, g.build.src), SRC_EXT);
 }
+// Pages that need evidence: GATES.pages, default ['/'].
+const pagesOf = (g) => (g.pages?.length ? g.pages : ['/']);
+// Source files the build is judged on. Redesign: every scope folder, with the excluded globs left out
+// (legacy code is not restyled, so its motion is not the build's). Mode new: the build folder.
+function designSrcFiles(g) {
+  if (g.mode !== 'redesign') return srcFiles(g);
+  const dirs = g.scope?.src?.length ? g.scope.src : [g.build?.src].filter(Boolean);
+  const excl = (g.scope?.exclude || []).map((x) => globToRe(x));
+  return dirs.flatMap((d) => walk(resolve(root, d), SRC_EXT))
+    .filter((f) => !excl.some((re) => re.test(relative(root, f).split(sep).join('/'))));
+}
 function mockupFiles() { return walk(S('mockup'), SRC_EXT); }
 function images(dir) { try { return readdirSync(dir).filter((f) => IMG.includes(extname(f).toLowerCase())).map((f) => join(dir, f)); } catch { return []; } }
 function rounds() {
@@ -184,16 +199,32 @@ const C = {
     return [a > 0 && a >= than, a === 0 ? `${label} missing (${relative(root, p)})` : a >= than ? `${label} is newer than the latest source change` : `${label} is OLDER than the latest source change: it does not show the current build. Redo it.`];
   },
   // expect: { target } for a slop report (the folder it must have scanned), { url } for an audit (the build URL).
+  // expect: { target } one folder the slop report must have scanned; { targets } every folder it must
+  // have scanned; { baseline } the --baseline file it must have used; { exclude } globs it must have
+  // been run with; { url } the URL an audit must have run on (compared with normUrl).
   reportOk: (name, than, label, expect = {}) => {
     const r = report(name);
     const p = S('reports', name);
     if (!r) return [false, `${label} report missing (cook/reports/${name})`];
     if (mtime(p) < than) return [false, `${label} report is older than the latest source change: run it again`];
+    const scannedText = (r.targets || []).map((t) => relative(root, t)).join(', ') || 'nothing';
     if (expect.target !== undefined && !(r.scanned > 0 && (r.targets || []).includes(expect.target))) {
-      const x = (r.targets || []).map((t) => relative(root, t)).join(', ') || 'nothing';
-      return [false, `${label}: the slop report scanned ${x}, not the build folder`];
+      return [false, `${label}: the slop report scanned ${scannedText}, not the build folder`];
     }
-    if (expect.url !== undefined && r.url !== expect.url) {
+    if (expect.targets) {
+      const missing = expect.targets.filter((t) => !(r.targets || []).includes(t));
+      if (!(r.scanned > 0) || missing.length) {
+        return [false, `${label}: the slop report does not scan every source folder (missing ${missing.map((t) => relative(root, t)).join(', ') || 'all'}; it scanned ${scannedText})`];
+      }
+    }
+    if (expect.baseline !== undefined && !String(r.baseline || '').endsWith(expect.baseline)) {
+      return [false, `${label}: run slop_scan.mjs with --baseline ${expect.baseline} (the report has ${r.baseline ? `--baseline ${r.baseline}` : 'no baseline'})`];
+    }
+    if (expect.exclude) {
+      const missing = expect.exclude.filter((x) => !(r.exclude || []).includes(x));
+      if (missing.length) return [false, `${label}: run slop_scan.mjs with --exclude ${missing.join(' --exclude ')}`];
+    }
+    if (expect.url !== undefined && normUrl(r.url) !== normUrl(expect.url)) {
       return [false, `${label}: the audit ran on ${r.url || 'nothing'}, not the build (${expect.url ?? 'no build URL set'})`];
     }
     return [r.ok === true, r.ok ? `${label}: clean (${r.warnings} warnings)` : `${label}: ${r.errors} errors. Fix them, then run it again`];
@@ -210,8 +241,9 @@ const C = {
 };
 
 function summaryFor(round) { return readJson(S('judge', round, 'summary.json')); }
+// Judge files: every .json in the round folder except the summary and the hidden A/B key (.abkey.json).
 function judgeFilesIn(round) {
-  try { return readdirSync(S('judge', round)).filter((f) => f.endsWith('.json') && f !== 'summary.json'); } catch { return []; }
+  try { return readdirSync(S('judge', round)).filter((f) => f.endsWith('.json') && f !== 'summary.json' && !f.startsWith('.')); } catch { return []; }
 }
 // The ledger entry that wrote a judge file (the first one: a judge file is written once).
 function judgeWriter(ledger, round, file) {
@@ -471,7 +503,7 @@ function doneChecks(g, step) {
       }
       out.push(compareCheck(S('compare', 'mockup'), newest, 'side-by-side with the references exists', 'no side-by-side in cook/compare/mockup (cook/scripts/side-by-side.mjs)'));
       out.push(C.reportOk('slop-mockup.json', newest, 'slop scan of the mockup', { target: resolve(S('mockup')) }));
-      const anim = motionCodeIn(files);
+      const anim = motionCodeIn(files, g);
       out.push([anim.length === 0, anim.length ? `animation code in the mockup (it must be static): ${anim.join(', ')}` : 'mockup is static']);
       if (g.mode === 'redesign') out.push(...redesignMockupChecks());
       out.push(...judgeChecks(g, 'mockup', 'mockup', newest));
@@ -512,19 +544,28 @@ function doneChecks(g, step) {
       const bad = (b.allowed || []).filter((a) => !quoteOk(a.quote) || !userSaid(root, a.quote));
       out.push([bad.length === 0, bad.length ? `bans switched off without the user's own words (typed in this project): ${bad.map((a) => a.id).join(', ')}` : 'every switched-off ban has the user\'s words']);
       out.push([briefLine('Bans') !== null, 'BRIEF.md has a "Bans:" line']);
+      if (g.mode === 'redesign') {
+        // The step 5 scan: every scope folder, against the baseline, excluded code included (only new findings fail).
+        out.push(slopCheck(g, 'slop-step5.json', 0, 'slop scan of the source folders (step 5)'));
+        out.push(designGitCheck(g));
+      }
       break;
     }
     case '6a': {
       out.push([Boolean(g.build?.src && g.build?.url), g.build?.src ? `build: ${g.build.src} served at ${g.build.url}` : 'build not set (gate.mjs set-build --src <dir> --url <url>)']);
-      const files = srcFiles(g);
+      const files = designSrcFiles(g);
       out.push([files.length > 0, `${files.length} source files in the build`]);
+      if (g.mode === 'redesign') {
+        out.push([Boolean(g.strategy), g.strategy ? `strategy: ${g.strategy}` : 'strategy not set (gate.mjs set-strategy --in-place, or --rebuild with the user\'s words)']);
+      }
       const newest = newestMtime(files);
       const r = latestRound();
       out.push([Boolean(r), r ? `latest round ${r}` : 'no round yet (cook/judge/r01/...)']);
       if (!r) break;
       out.push(...roundEvidence(g, r, newest, false));
-      const anim = motionCodeIn(files);
+      const anim = motionCodeIn(files, g);
       out.push([anim.length === 0, anim.length ? `animation code in the static build (motion waits for step 6b): ${anim.slice(0, 5).join(', ')}` : 'no animation code in the static build (hover/focus transitions only)']);
+      if (g.mode === 'redesign') out.push(decorativeCheck(g));
       out.push(...judgeChecks(g, r, 'static', newest));
       out.push(C.approval(g, 'static'));
       break;
@@ -536,7 +577,7 @@ function doneChecks(g, step) {
       out.push([rows.length >= 5, `MOTION.md lists ${rows.length} effect(s) (need 5+ table rows)`]);
       const evidence = (() => { try { return readdirSync(S('refs', 'motion')); } catch { return []; } })();
       const refsDir = (() => { try { return readdirSync(S('refs')); } catch { return []; } })();
-      const srcs = srcFiles(g);
+      const srcs = designSrcFiles(g);
       const cited = new Set();
       let vague = 0, unsourced = [];
       for (const row of rows) {
@@ -550,7 +591,7 @@ function doneChecks(g, step) {
       out.push([vague === 0 && rows.length > 0, vague ? `${vague} effect(s) without a measured duration and easing in the "How" column (e.g. "700ms, cubic-bezier(.2,.7,.2,1), 24px up")` : 'every effect has a duration and an easing']);
       out.push([unsourced.length === 0, unsourced.length ? `effects not tied to a reference id (R01 / V01): ${[...new Set(unsourced)].join(', ')}` : 'every effect cites a reference']);
       out.push([cited.size >= 2, `effects taken from ${cited.size} reference(s) (need 2+: take from many, copy none)`]);
-      const anim = motionCodeIn(srcs);
+      const anim = motionCodeIn(srcs, g);
       out.push([anim.length > 0, anim.length ? `animation code in the build: ${anim.slice(0, 3).join(', ')}` : 'the build has no animation code yet']);
       for (const id of cited) {
         // Evidence, non-empty: the user's video (refs/V01.*), a recording, or any tool's extraction output in
@@ -593,12 +634,13 @@ function doneChecks(g, step) {
       break;
     }
     case '8': {
-      const files = srcFiles(g);
+      const files = designSrcFiles(g);
       const newest = newestMtime(files);
       const r = latestRound();
       if (!r) { out.push([false, 'no round yet']); break; }
       out.push(...roundEvidence(g, r, newest, g.motion !== 'none'));
       out.push(...judgeChecks(g, r, 'final', newest));
+      if (g.mode === 'redesign') out.push(...abChecks(g, r));
       // Separate judge, proven by the guard hook's ledger: a judge file in this round written
       // by a session that never edited the build, the mockup or the project.
       const ledger = readLedger(root);
@@ -626,32 +668,140 @@ function doneChecks(g, step) {
   return out;
 }
 
-// Files (and first line) that contain animation code.
-function motionCodeIn(files) {
+// Files (and first line) that contain animation code. Comment lines and prose do not count, and a
+// line allowed in GATES.motion_allow (its project-relative file and hash) does not count either.
+function motionCodeIn(files, g = {}) {
   const hits = [];
   for (const f of files) {
-    if (!FRONTEND_EXT.includes(extname(f).toLowerCase())) continue;
-    const lines = readFileSync(f, 'utf8').split('\n');
-    const i = lines.findIndex((l) => MOTION_CODE.test(l));
-    if (i >= 0) hits.push(`${relative(root, f)}:${i + 1}`);
+    const ext = extname(f).toLowerCase();
+    if (!FRONTEND_EXT.includes(ext)) continue;
+    const rel = relative(root, f).split(sep).join('/');
+    const left = unallowedMotion(readFileSync(f, 'utf8'), ext, rel, g.motion_allow || []);
+    if (left.length) hits.push(`${rel}:${left[0].line}`);
   }
   return hits;
 }
 
+// Slop report check. Redesign: the report scanned every scope folder, ran with the baseline and with
+// every exclude glob (so only new findings in excluded code fail). Mode new: the build folder.
+const normGlob = (x) => String(x).replace(/\\/g, '/').replace(/^\.\//, '');
+function slopCheck(g, name, than, label) {
+  if (g.mode !== 'redesign') return C.reportOk(name, than, label, { target: g.build?.src ? resolve(root, g.build.src) : null });
+  return C.reportOk(name, than, label, {
+    targets: (g.scope?.src || []).map((x) => resolve(root, x)),
+    baseline: 'cook/baseline/slop.json',
+    exclude: (g.scope?.exclude || []).map(normGlob),
+  });
+}
+
+// The proof a round needs, newer than the newest source file. Mode new with the one default page keeps
+// the old names (a still with desktop or mobile in its name, audit-rNN.json). Otherwise every page has
+// <slug>-desktop.png and <slug>-mobile.png; in redesign mode also audit-rNN-<slug>.json with that page's URL.
 function roundEvidence(g, r, newest, needVideo) {
   const out = [];
-  const st = images(S('stills', r));
-  for (const vp of ['desktop', 'mobile']) {
-    const f = st.filter((p) => basename(p).includes(vp)).sort((a, b) => mtime(a) - mtime(b))[0];
-    out.push(f ? C.newer(f, newest, `${r} ${vp} stills`) : [false, `${r} ${vp} stills missing (shoot.mjs <url> --out cook/stills/${r} --name S01)`]);
+  const pages = pagesOf(g);
+  const legacy = g.mode !== 'redesign' && pages.length === 1 && pages[0] === '/';
+  if (legacy) {
+    const st = images(S('stills', r));
+    for (const vp of ['desktop', 'mobile']) {
+      const f = st.filter((p) => basename(p).includes(vp)).sort((a, b) => mtime(a) - mtime(b))[0];
+      out.push(f ? C.newer(f, newest, `${r} ${vp} stills`) : [false, `${r} ${vp} stills missing (shoot.mjs <url> --out cook/stills/${r} --name S01)`]);
+    }
+  } else {
+    for (const page of pages) for (const vp of ['desktop', 'mobile']) {
+      out.push(C.newer(S('stills', r, `${pageSlug(page)}-${vp}.png`), newest, `${r} ${page} ${vp} still`));
+    }
   }
   if (needVideo) {
     let vids = []; try { vids = readdirSync(S('stills', r)).filter((f) => f.endsWith('-motion.webm')).map((f) => S('stills', r, f)); } catch { /* none */ }
     out.push(vids.length ? C.newer(vids[0], newest, `${r} motion recording`) : [false, `${r} motion recording missing (shoot.mjs <url> --out cook/stills/${r} --name S01 --live --video 12)`]);
   }
   out.push(compareCheck(S('compare', r), newest, `${r} side-by-side exists`, `${r} side-by-side missing (cook/compare/${r}/)`));
-  out.push(C.reportOk(`slop-${r}.json`, newest, `${r} slop scan`, { target: g.build?.src ? resolve(root, g.build.src) : null }));
-  out.push(C.reportOk(`audit-${r}.json`, newest, `${r} audit`, { url: buildUrl(g) }));
+  out.push(slopCheck(g, `slop-${r}.json`, newest, `${r} slop scan`));
+  if (g.mode === 'redesign') {
+    // Regression proof for the round: regress.mjs must have run on this build and passed.
+    out.push(C.reportOk(`regress-${r}.json`, newest, `${r} regress`));
+    const base = buildUrl(g);
+    for (const page of pages) {
+      out.push(C.reportOk(`audit-${r}-${pageSlug(page)}.json`, newest, `${r} ${page} audit`, { url: base ? pageUrl(base, page) : null }));
+    }
+  } else {
+    out.push(C.reportOk(`audit-${r}.json`, newest, `${r} audit`, { url: buildUrl(g) }));
+  }
+  return out;
+}
+
+// Verify 5 (redesign): no design file may change before the mockup passed. Compares the scope folders
+// with the baseline commit and adds untracked files; only design files count (isDesignFile).
+function designGitCheck(g) {
+  const label = 'design files vs the baseline commit';
+  const commit = g.baseline?.commit ?? null;
+  if (!commit) return [true, `${label}: not measured: not a git repo`];
+  const scope = g.scope?.src || [];
+  const git = (args) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+  const diff = git(['diff', '--name-only', '--relative', commit, '--', ...scope]);
+  const untracked = git(['ls-files', '--others', '--exclude-standard', '--', ...scope]);
+  if (diff.status !== 0 || untracked.status !== 0) return [true, `${label}: not measured: not a git repo (git could not compare with ${commit.slice(0, 12)})`];
+  const names = (text) => String(text).split('\n').map((l) => l.trim().replace(/\\/g, '/')).filter(Boolean);
+  const changed = [...new Set([...names(diff.stdout), ...names(untracked.stdout)])];
+  const design = changed.filter((x) => isDesignFile(x, g));
+  return design.length === 0
+    ? [true, `${label}: none changed (${changed.length} file(s) in scope changed, none of them design)`]
+    : [false, `design files changed before the mockup passed: ${design.join(', ')}`];
+}
+
+// Verify 6a (redesign): every motion hit classified decorative in KEEP.md ## Motion must be gone from the code.
+function decorativeCheck(g) {
+  const motion = readJson(S('baseline', 'motion.json'), []);
+  const decorative = new Set();
+  for (const l of sectionOf(readText(S('baseline', 'KEEP.md')), 'Motion').split('\n')) {
+    const cells = l.split('|').map((c) => c.trim());
+    const i = cells.findIndex((c) => /^[0-9a-f]{12}$/.test(c));
+    if (i >= 0 && /^decorative\b/i.test(cells[i + 1] || '')) decorative.add(cells[i]);
+  }
+  const want = new Set((Array.isArray(motion) ? motion : []).map((m) => m.hash).filter((h) => decorative.has(h)));
+  const hits = [];
+  for (const f of designSrcFiles(g)) {
+    const ext = extname(f).toLowerCase();
+    if (!FRONTEND_EXT.includes(ext)) continue;
+    const rel = relative(root, f).split(sep).join('/');
+    for (const h of motionHits(readText(f), ext)) if (want.has(h.hash)) hits.push(`${rel}:${h.line} "${h.text}"`);
+  }
+  return hits.length === 0
+    ? [true, `no decorative motion left in the code (${want.size} hit(s) classified decorative in KEEP.md)`]
+    : [false, `decorative motion still in the code (remove it in this round, redesign it in 6b): ${hits.slice(0, 5).join('; ')}`];
+}
+
+// Verify 8 (redesign): old against new. Every judge file in the round names the new side of every pair in
+// .abkey.json, and no calibrated dimension of the round ends below the baseline's.
+function abChecks(g, r) {
+  const key = readJson(S('judge', r, '.abkey.json'));
+  if (!Array.isArray(key) || key.length === 0) return [[false, `no A/B key for ${r}: run pair.mjs --round ${r}`]];
+  const out = [];
+  const files = judgeFilesIn(r);
+  if (!files.length) out.push([false, `no judge files in ${r} to check the A/B choices`]);
+  for (const f of files) {
+    const doc = readJson(S('judge', r, f)) || {};
+    const ab = Array.isArray(doc.ab) ? doc.ab : [];
+    const problems = [];
+    for (const k of key) {
+      const where = `${k.pair} (${k.page} ${k.viewport})`;
+      const e = ab.find((x) => x && x.pair === k.pair);
+      if (!e) problems.push(`no ab entry for ${where}`);
+      else if (e.better !== k.new) problems.push(e.better === 'left' || e.better === 'right' ? `prefers the old site in ${where}` : `no valid better (left or right) for ${where}`);
+    }
+    out.push([problems.length === 0, problems.length ? `${f}: ${problems.join('; ')}` : `${f}: every A/B pair (${key.length}) chooses the new side`]);
+  }
+  const base = summaryFor('baseline');
+  if (!base) { out.push([false, 'no baseline score to compare with: cook/judge/baseline/summary.json (score the baseline)']); return out; }
+  const now = summaryFor(r);
+  const below = [];
+  for (const [d, b] of Object.entries(base.calibrated?.dims || {})) {
+    const v = now?.calibrated?.dims?.[d];
+    if (typeof v !== 'number') { if (!(d === MOTION_DIM && g.motion === 'none')) below.push(`${d} not scored in ${r}`); continue; }
+    if (v < b) below.push(`${d} ${v} (baseline ${b})`);
+  }
+  out.push([below.length === 0, below.length ? `below the baseline in cook/judge/${r}/summary.json: ${below.join(', ')}` : 'no dimension below the baseline (cook/judge/baseline/summary.json)']);
   return out;
 }
 
@@ -667,7 +817,7 @@ function nextStep(g) { return stepsFor(g).find((s) => !['passed', 'overridden'].
 
 // ---------------- score ----------------
 export function scoreRound(dir, offset = 0) {
-  const files = readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'summary.json');
+  const files = readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'summary.json' && !f.startsWith('.'));
   const judges = [];
   const problems = [];
   for (const f of files) {
@@ -700,6 +850,60 @@ export function scoreRound(dir, offset = 0) {
     slop_seen: [...new Set(judges.flatMap((j) => j.slop_seen || []))],
     gaps, at: new Date().toISOString(),
   };
+}
+
+// ---------------- final report ----------------
+// Read-only: the steps, the overrides and the motion allowances with the user's words. In redesign mode
+// also the before and after scores (calibrated), slop and audit counts, and every Dropped line of KEEP.md.
+function finalReport(g) {
+  const r = latestRound();
+  const L = [];
+  const fmt = (n) => (typeof n === 'number' ? String(n) : '-');
+  const r2 = (n) => Math.round(n * 100) / 100;
+  L.push(`# Final report: ${g.project}`, '', `Mode: ${g.mode || 'new'}. Written ${new Date().toISOString()}.`, '');
+  L.push('## Steps', '', '| Step | Status | Name |', '|---|---|---|');
+  for (const s of stepsFor(g)) L.push(`| ${s} | ${g.steps[s]?.status || 'pending'} | ${STEP_NAMES[s]} |`);
+  L.push('', '## Overrides', '');
+  const ov = Object.entries(g.overrides || {});
+  if (!ov.length) L.push('None.');
+  for (const [s, o] of ov) L.push(`- Step ${s}, the user said "${o.quote}". Reason: ${o.reason}. Unmet at the time: ${(o.unmet || []).join('; ') || 'none'}`);
+  if (g.mode === 'redesign') {
+    const bs = summaryFor('baseline');
+    const ls = r ? summaryFor(r) : null;
+    L.push('', `## Before and after (calibrated, ${r ? `baseline against ${r}` : 'no round scored yet'})`, '');
+    if (!bs) L.push('No baseline score (cook/judge/baseline/summary.json is missing).');
+    else {
+      L.push(`| Dimension | Baseline | ${r || 'Latest'} | Change |`, '|---|---|---|---|');
+      const rows = [['overall', bs.calibrated?.overall, ls?.calibrated?.overall],
+        ...Object.keys(bs.calibrated?.dims || {}).map((d) => [d, bs.calibrated.dims[d], ls?.calibrated?.dims?.[d]])];
+      for (const [name, b, v] of rows) {
+        const diff = typeof b === 'number' && typeof v === 'number' ? r2(v - b) : null;
+        L.push(`| ${name} | ${fmt(b)} | ${fmt(v)} | ${diff === null ? '-' : diff >= 0 ? `+${diff}` : String(diff)} |`);
+      }
+    }
+    const bslop = readJson(S('baseline', 'slop.json'));
+    const lname = r && existsSync(S('reports', `slop-${r}.json`)) ? `slop-${r}.json` : 'slop-step5.json';
+    const lslop = report(lname);
+    L.push('', '## Slop', '', `| | Baseline (slop.json) | Now (${lname}) |`, '|---|---|---|');
+    L.push(`| errors | ${fmt(bslop?.errors)} | ${fmt(lslop?.errors)} |`, `| warnings | ${fmt(bslop?.warnings)} | ${fmt(lslop?.warnings)} |`);
+    if (lslop && Array.isArray(lslop.new)) L.push('', `Against the baseline: ${lslop.new.length} new, ${lslop.fixed?.length ?? 0} fixed, ${lslop.remaining?.length ?? 0} remaining.`);
+    const aud = pagesOf(g).map((p) => {
+      const slug = pageSlug(p);
+      return { p, b: readJson(S('baseline', `audit-${slug}.json`))?.errors, l: r ? report(`audit-${r}-${slug}.json`)?.errors : undefined };
+    });
+    const sum = (k) => aud.reduce((n, a) => n + (typeof a[k] === 'number' ? a[k] : 0), 0);
+    L.push('', '## Audit errors', '', `| Page | Baseline | ${r || 'Latest'} |`, '|---|---|---|');
+    for (const a of aud) L.push(`| ${a.p} | ${fmt(a.b)} | ${fmt(a.l)} |`);
+    L.push(`| total | ${sum('b')} | ${sum('l')} |`);
+    const dropped = sectionOf(readText(S('baseline', 'KEEP.md')), 'Dropped').split('\n').map((l) => l.trim()).filter(Boolean);
+    L.push('', '## Dropped (KEEP.md)', '');
+    L.push(...(dropped.length ? dropped : ['None listed.']));
+  }
+  L.push('', '## Motion allowed as functional', '');
+  const ma = g.motion_allow || [];
+  if (!ma.length) L.push('None.');
+  for (const a of ma) L.push(`- ${a.file} ${a.hash}: ${a.reason}. The user said: "${a.quote || 'no quote recorded'}"`);
+  return L.join('\n') + '\n';
 }
 
 // ---------------- CLI ----------------
@@ -900,9 +1104,12 @@ if (isMainRun) {
     case 'motion-allow': {
       const g = load();
       const file = a1, hash = argv[2];
-      if (!file || !hash || hash.startsWith('--')) fail('motion-allow <file> <hash> --reason "..." (the hash is in cook/baseline/motion.json)');
+      if (!file || !hash || hash.startsWith('--')) fail('motion-allow <file> <hash> --reason "..." --quote "<user words>" (the hash is in cook/baseline/motion.json)');
       const reason = opt('--reason');
       if (!reason || !reason.trim()) fail('motion-allow needs a --reason (why this existing motion is functional)');
+      // Only the user can say which motion is functional: their words, typed in this project.
+      const q = opt('--quote');
+      needUserWords(q);
       const abs = resolve(root, file);
       let text = null;
       try { text = readFileSync(abs, 'utf8'); } catch { /* missing */ }
@@ -910,7 +1117,7 @@ if (isMainRun) {
       const rel = relative(root, abs).split(sep).join('/');
       const hits = motionHits(text, extname(abs).toLowerCase());
       if (!hits.some((h) => h.hash === hash)) fail(`${rel} has no animation line with hash ${hash}. Hashes in this file: ${hits.map((h) => `${h.hash} (line ${h.line})`).join(', ') || 'none'}`);
-      g.motion_allow = [...(g.motion_allow || []).filter((a) => !(a.file === rel && a.hash === hash)), { file: rel, hash, reason: reason.trim() }];
+      g.motion_allow = [...(g.motion_allow || []).filter((a) => !(a.file === rel && a.hash === hash)), { file: rel, hash, reason: reason.trim(), quote: q.trim() }];
       save(g);
       console.log(`allowed ${rel} line hash ${hash}: ${reason.trim()}`);
       break;
@@ -990,8 +1197,16 @@ if (isMainRun) {
       break;
     }
     case 'elapsed': { const g = load(); console.log(`${hoursElapsed(g).toFixed(2)}h${g.time ? ` of ${g.time.mode} ${g.time.hours}h` : ' (timer not set)'}`); break; }
+    case 'report': {
+      const g = load();
+      const md = finalReport(g);
+      writeFileSync(S('REPORT.md'), md);
+      process.stdout.write(md);
+      console.log(`\nWritten to ${relative(root, S('REPORT.md'))}`);
+      break;
+    }
     default:
-      console.log('usage: gate.mjs init|status|check|verify|approve|override|reopen|set-bar|set-time|set-build|set-motion|set-pages|set-checks|set-strategy|motion-allow|allow-dirty|score|calibrate|elapsed (see the header of this file)');
+      console.log('usage: gate.mjs init|status|check|verify|approve|override|reopen|set-bar|set-time|set-build|set-motion|set-pages|set-checks|set-strategy|motion-allow|allow-dirty|score|calibrate|elapsed|report (see the header of this file)');
       process.exit(cmd ? 2 : 0);
   }
 }
