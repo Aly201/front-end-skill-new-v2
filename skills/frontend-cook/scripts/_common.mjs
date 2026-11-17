@@ -271,3 +271,22 @@ export function globToRe(glob) {
 }
 
 export function readGates(root) { return readJson(join(root, STATE_DIR, 'GATES.json'), null); }
+
+// What counts as a design file, for the guard (before step 5) and gate.mjs (the verify 5 git check).
+// Logic, test, config and server/api files are not design; neither are cook/mockup and cook/refs.
+const DESIGN_SKIP = /(^|\/)(node_modules|dist|build|\.next|\.astro|\.svelte-kit|\.git)\//;
+const LOGIC_EXT = ['.js', '.mjs', '.cjs', '.ts'];
+const NOT_DESIGN = [/(^|\/)[^/]*\.(test|spec)\.[^/]*$/i, /(^|\/)[^/]*\.config\.[^/]*$/i, /(^|\/)__tests__\//, /(^|\/)(server|api)\//];
+export function isDesignFile(rel, gates = {}) {
+  rel = String(rel).replace(/\\/g, '/');
+  const ext = extname(rel).toLowerCase();
+  if (rel.startsWith('cook/mockup/') || rel.startsWith('cook/refs/')) return false;
+  if (!FRONTEND_EXT.includes(ext) || DESIGN_SKIP.test(rel)) return false;
+  if (LOGIC_EXT.includes(ext) || NOT_DESIGN.some((re) => re.test(rel))) return false;
+  const exclude = (Array.isArray(gates?.scope?.exclude) ? gates.scope.exclude : []).map((x) => globToRe(x));
+  if (exclude.some((re) => re.test(rel))) return false;
+  const src = (Array.isArray(gates?.scope?.src) ? gates.scope.src : [])
+    .map((x) => String(x).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean);
+  if (src.length) return src.some((x) => rel === x || rel.startsWith(`${x}/`));
+  return true;
+}

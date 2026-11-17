@@ -22,7 +22,7 @@
 // Exit 2 blocks the tool call; the message on stderr goes to Claude.
 import { readFileSync, appendFileSync, existsSync } from 'node:fs';
 import { join, resolve, relative, extname, isAbsolute } from 'node:path';
-import { projectRoot, rootForFile, readJson, unallowedMotion, globToRe, STATE_DIR, FRONTEND_EXT } from './_common.mjs';
+import { projectRoot, rootForFile, readJson, unallowedMotion, globToRe, STATE_DIR, FRONTEND_EXT, isDesignFile as isDesignFileShared } from './_common.mjs';
 
 const ORDER = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 const NAMES = { 0: 'setup', 1: 'references', 2: 'mockup', 3: 'bar', 4: 'time', 5: 'bans', '6a': 'static build', '6b': 'motion', 7: 'feedback', 8: 'separate judge' };
@@ -44,10 +44,6 @@ const AGENT_BROWSER = /\bagent-browser\b/i;
 const AGENT_BROWSER_TOOL = /agent[-_]browser/i;
 const AGENT_BROWSER_MSG = 'agent-browser is not used by this skill: take screenshots with shoot.mjs and check pages with audit.mjs.';
 const SKIP = /(^|\/)(node_modules|dist|build|\.next|\.astro|\.svelte-kit|\.git)\//;
-// Logic files are not design: they may be written before step 5.
-const LOGIC_EXT = ['.js', '.mjs', '.cjs', '.ts'];
-// Test, config, server and api files are not design, wherever they are.
-const NOT_DESIGN = [/(^|\/)[^/]*\.(test|spec)\.[^/]*$/i, /(^|\/)[^/]*\.config\.[^/]*$/i, /(^|\/)__tests__\//, /(^|\/)(server|api)\//];
 
 let input = {};
 try { input = JSON.parse(readFileSync(0, 'utf8') || '{}'); } catch { process.exit(0); }
@@ -91,19 +87,8 @@ function bashProblem(cmd) {
   return null;
 }
 
-// Design files before step 5: markup and style in the redesign scope (or any frontend file when
-// there is no scope). cook/mockup and cook/refs are free.
-const SCOPE_SRC = (Array.isArray(g.scope?.src) ? g.scope.src : [])
-  .map((s) => String(s).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean);
-const SCOPE_EXCLUDE = (Array.isArray(g.scope?.exclude) ? g.scope.exclude : []).map((x) => globToRe(x));
-function isDesignFile(rel, ext) {
-  if (rel.startsWith('cook/mockup/') || rel.startsWith('cook/refs/')) return false;
-  if (!FRONTEND_EXT.includes(ext) || SKIP.test(rel)) return false;
-  if (LOGIC_EXT.includes(ext) || NOT_DESIGN.some((re) => re.test(rel))) return false;
-  if (SCOPE_EXCLUDE.some((re) => re.test(rel))) return false;
-  if (SCOPE_SRC.length) return SCOPE_SRC.some((s) => rel === s || rel.startsWith(`${s}/`));
-  return true;
-}
+// Design files: shared rule in _common.mjs (also used by the gate's verify 5 git check).
+const isDesignFile = (rel) => isDesignFileShared(rel, g);
 
 // Motion lines the edit adds: unallowed hits in the new text that are not in the old text,
 // counted per hash. Edit compares old_string with new_string, MultiEdit all edits combined,
@@ -179,7 +164,7 @@ const isFrontend = FRONTEND_EXT.includes(ext) && !SKIP.test(rel);
 const inMockup = rel.startsWith('cook/mockup/');
 const inRefs = rel.startsWith('cook/refs/');
 
-if (!passed('5') && isDesignFile(rel, ext)) {
+if (!passed('5') && isDesignFile(rel)) {
   block(`steps 2 to 5 (mockup, bar, time, bans) must pass before build code. (${rel})`);
 }
 
