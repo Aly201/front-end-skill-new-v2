@@ -88,6 +88,7 @@ node <skill>/scripts/slop_scan.mjs src --baseline cook/baseline/slop.json --excl
 - Inside scope, the scan is as strict as ever: zero errors.
 - Excluded files: only **new** findings fail. Old ones are listed as `remaining`; fixed ones as `fixed`.
 - `verify 5` runs a git check: `git diff --name-only <baseline commit> -- <src>` must be empty. No design file changes before step 5 passes; design work starts in 6a.
+- Before step 5 the guard lets tests, config, server and API code, and logic fixes through. The git check still lists every changed file under `--src`, so a logic fix inside a source folder fails `verify 5` until it is moved out of the source folders or the step is passed. Keep logic fixes in the source folders for 6a.
 
 ## Step 6a (redesign): in place, in order
 

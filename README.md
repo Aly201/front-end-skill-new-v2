@@ -19,9 +19,11 @@ It is built on top of [cook](https://github.com/Leonxlnx/cook) (the build, compa
 | 7 | Specific feedback | Every feedback item names a section (S1, S2...) from the section-by-section description, none is open, every closed one points to a screenshot that exists. No feedback at all needs your words. |
 | 8 | Separate judge | 2+ fresh judges agree: with 2, their scores are within 1.0; with 3 or more, the lowest is within 1.0 of the median. Judge files are written once and must be newer than the latest code change. The hook's log proves a judge file was written by a separate session that never touched the build, and that judge must meet the bar on its own. The time floor is reached and you approved the final stills. |
 
+For an existing site, redesign mode adds step 0b (a baseline of the current site, after setup) and the checks in the section below to steps 1, 2, 3, 5, 6a, every round and 8. The bar does not change.
+
 ## How it is enforced
 
-Two layers. `gate.mjs` checks every step before it starts and before it counts as done. A **guard hook** (added to your project's `.claude/settings.json` by setup) makes Claude Code itself refuse: build code until steps 2 to 5 pass, motion code (scroll reveals, long transitions, marquees included) before the static design is approved, `agent-browser`, a second write to a judge file, and hand edits to the files only the scripts write. It also logs every action and every prompt you type, which is how your words, the separate judge and the active time are proven. Both behaviours were tested in a live Claude Code session.
+Two layers. `gate.mjs` checks every step before it starts and before it counts as done. A **guard hook** (added to your project's `.claude/settings.json` by setup) makes Claude Code itself refuse: design code until steps 2 to 5 pass, newly added motion code (scroll reveals, long transitions, marquees included) before the static design is approved, `agent-browser`, a second write to a judge file, and hand edits to the files only the scripts write. It also logs every action and every prompt you type, which is how your words, the separate judge and the active time are proven. Both behaviours were tested in a live Claude Code session.
 
 ## Why it does not agree with you
 
@@ -59,6 +61,19 @@ Then in Claude Code, inside your project:
 3. Answer the one intake message (or reply "defaults").
 4. Approve the mockup, the static design and the final stills when it asks, in your own words.
 5. For step 8, open a second Claude Code session in the same project and run `/frontend-cook-judge <round>`.
+
+## Improving an existing site (redesign mode)
+
+For a site that already works and should be taken from 2/10 to 9/10 without breaking it. Setup, the references and the bar are the same; the difference is that the current site is measured first and every change is checked against it.
+
+- **Init:** `gate.mjs init --project X --mode redesign --src src --exclude 'src/legacy/**' --url http://localhost:5173 --pages /,/pricing`, then `set-checks --cmd "npm test" --cmd "npm run build"`.
+- **Baseline (step 0b):** `baseline.mjs` captures the current site's stills, page inventory (links, nav, forms, headings, ids), slop and audit reports, motion and check results. You and the agent write `KEEP.md` (what must stay, what is dropped, in your words) and `probes.json` (form and menu checks). A dirty git tree is refused unless you agree.
+- **Strategy:** in place by default, one stage at a time: tokens, shared components, sections top to bottom, dead CSS. A rebuild only with your words, and then the existing logic is ported, not rewritten.
+- **Every round:** `regress.mjs` diffs the page inventories against the baseline (a lost link, form field or heading fails unless `KEEP.md` names it), runs the probes and the checks.
+- **Judging:** the baseline is scored like any round. In the final round `pair.mjs` builds unlabeled old/new pairs, and every judge must prefer the new side in every pair.
+- **Final report:** before and after per dimension, slop and audit deltas, and every dropped item with your words.
+
+Full details: `skills/frontend-cook/references/redesign.md`.
 
 ## Honest limits
 

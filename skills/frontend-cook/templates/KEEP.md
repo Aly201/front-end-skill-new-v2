@@ -8,7 +8,7 @@ What must still work and be visible after the redesign. regress.mjs fails the ro
 
 - Contact form on /: Name, Email, Message, Send button. "The form has to keep working, it is how we get leads." (user)
 - Nav: Home, Pricing, Docs, Log in. "Same pages, same order." (user)
-- Mobile menu opens from the Menu button. (user, not said: confirm before you write it here)
+- Mobile menu opens from the Menu button. (not yet said by the user: confirm before it goes here)
 
 ## Dropped
 

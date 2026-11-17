@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.0
+Redesign mode: improve an existing site without breaking what works.
+- `gate.mjs init --mode redesign` takes the source folders, exclusions, pages and checks (`set-checks`). Step 0b captures a baseline with `baseline.mjs`: stills, page inventory, slop and audit reports, motion hits and check results, plus `KEEP.md` and `probes.json`.
+- `regress.mjs` runs every round: lost links, nav items, forms, fields, headings and ids are errors unless `KEEP.md` names the drop with the user's words; probes and checks must still pass.
+- `pair.mjs` and the judge `ab` field: unlabeled old/new pairs; every judge must prefer the new side in every pair.
+- In-place strategy by default (`set-strategy`); a rebuild needs the user's words and ports the existing logic.
+- Slop scan `--baseline` and `--exclude`: excluded legacy code fails only on new slop.
+- Guard: blocks only added animation (functional motion can be allowed with `motion-allow`), and before step 5 only design files in the source folders; baseline files and the judge key are protected.
+- Shoots every page and interactive state (`shoot.mjs --pages`, `--steps`, `--suffix`); audit URLs compare normalized.
+- Calibration re-bases correctly when a baseline round is rated.
+
 ## 1.2.0
 Fixes from an independent review of 1.1.0.
 - User words are verified against the prompts the user actually typed (logged by the guard hook); approvals expire when the stills change.

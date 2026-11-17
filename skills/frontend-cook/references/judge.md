@@ -46,9 +46,10 @@ Write ONLY this JSON to [cook/judge/<round>/judge-<letter>.json]:
  "scores":{"layout":0,"typography":0,"color":0,"components":0,"imagery":0,"responsive":0[,"motion":0]},
  "overall":0,"similarity":0,
  "gaps":[{"where":"","what":"","fix":""}],
- "slop_seen":[],"would_ship":false
- [redesign rounds only:] ,"ab":[{"pair":"ab-1","better":"left|right","why":""}]}
+ "slop_seen":[],"would_ship":false}
 ```
+
+Redesign rounds add one key to that JSON: `"ab":[{"pair":"ab-1","better":"left|right","why":"..."}]`, with one entry per pair in `ab-*.jpg`.
 
 Set `"different_model": true` in a judge's file when it ran on a different model from the builder. It is recorded but not proof: only the separate session is verified.
 
