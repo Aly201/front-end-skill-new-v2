@@ -38,15 +38,17 @@ const pw = loadPlaywright(root);
 if (!pw) die(1, 'Playwright not found. Run the setup check: node preflight.mjs');
 
 // Lines of KEEP.md under "## Dropped" and "## Copy changes", the only places a loss can be waived.
+// Returned separately: removals are waived only by Dropped lines (see diffInventory).
 function readWaived(path) {
-  if (!existsSync(path)) return [];
-  const out = [];
+  const out = { dropped: [], copy: [] };
+  if (!existsSync(path)) return out;
   let section = '';
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     const h = /^##\s+(.*?)\s*$/.exec(line);
     if (h) { section = h[1].toLowerCase(); continue; }
     if (!line.trim()) continue;
-    if (section === 'dropped' || section === 'copy changes') out.push(line);
+    if (section === 'dropped') out.dropped.push(line);
+    else if (section === 'copy changes') out.copy.push(line);
   }
   return out;
 }
@@ -88,7 +90,7 @@ try {
       findings.push({ severity: 'error', check: 'inventory', page, message: 'no baseline inventory for this page: rerun node baseline.mjs' });
       continue;
     }
-    const now = await inventoryOfUrl(browser, pageUrl(url, page), 'desktop');
+    const now = (await inventoryOfUrl(browser, pageUrl(url, page), 'desktop')).inventory;
     for (const f of diffInventory(bp, now, waived)) {
       findings.push({ severity: f.severity, check: 'inventory', page, message: f.message });
     }

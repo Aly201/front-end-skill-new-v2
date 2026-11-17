@@ -183,7 +183,7 @@ for (const page of pages) {
 const { browser } = await launchBrowser(pw);
 const inventory = { pages: {} };
 try {
-  for (const page of pages) inventory.pages[page] = await inventoryOfUrl(browser, pageUrl(url, page), 'desktop');
+  for (const page of pages) inventory.pages[page] = (await inventoryOfUrl(browser, pageUrl(url, page), 'desktop')).inventory;
 } finally {
   await browser.close();
 }
