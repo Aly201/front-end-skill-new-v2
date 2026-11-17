@@ -15,6 +15,7 @@ The builder never scores its own work. Judges are fresh: no history, no code, no
 - `cook/compare/<round>/*.jpg`: references left, build right.
 - `cook/stills/<round>/*-fold.png` and the full-page stills, desktop and mobile.
 - For motion rounds: `cook/stills/<round>/*-motion-strip.jpg` and the `.webm` path.
+- Redesign rounds only: `cook/compare/<round>/ab-*.jpg`, pairs of the old site and the round's build, side by side, with no labels. Left or right is random. Judges never learn which side is new.
 - The bar numbers, this prompt and the `user_bans` list from `cook/bans.json`. Nothing else.
 
 ## The prompt
@@ -38,12 +39,15 @@ List any of these you see: beige, purple gradients, eyebrow labels, monospace up
 three identical icon cards, everything centered, everything in rounded shadowed cards, grey low-contrast text,
 generic phrases like "Unlock the power", em dashes[, and the user's own bans: <user_bans from cook/bans.json>].
 
+[Redesign rounds only] Also look at each ab-*.jpg pair. Say which page is better, left or right, and why, in one line. Judge the page, not the position. The ab list is required for every pair listed in the round.
+
 Write ONLY this JSON to [cook/judge/<round>/judge-<letter>.json]:
 {"judge":"<letter>","fresh":true,"model":"<your model>","session":"subagent",
  "scores":{"layout":0,"typography":0,"color":0,"components":0,"imagery":0,"responsive":0[,"motion":0]},
  "overall":0,"similarity":0,
  "gaps":[{"where":"","what":"","fix":""}],
- "slop_seen":[],"would_ship":false}
+ "slop_seen":[],"would_ship":false
+ [redesign rounds only:] ,"ab":[{"pair":"ab-1","better":"left|right","why":""}]}
 ```
 
 Set `"different_model": true` in a judge's file when it ran on a different model from the builder. It is recorded but not proof: only the separate session is verified.
@@ -51,6 +55,7 @@ Set `"different_model": true` in a judge's file when it ran on a different model
 ## After the judges
 
 1. `gate.mjs score <round>`. It rejects files that are not fresh, have scores outside 0-10, or name fewer than 3 gaps.
-2. Agreement: with 2 judges, their overall scores must be within 1.0. With 3 or more, the lowest must be within 1.0 of the median. If not, fix what the low judge named, or add a judge in a new round.
-3. The weakest dimension and the top gaps become the next round's focus.
-4. Never edit a judge's file. Never re-run a judge until you like the number. Fix the work instead.
+2. Redesign: `pair.mjs` keeps the old/new key in a protected file. Every judge in the final round must have an `ab` entry for every pair, and every choice must be the new side. `verify 8` checks this. A judge that prefers the old side in any pair fails the round: fix the design, do not re-run the judge.
+3. Agreement: with 2 judges, their overall scores must be within 1.0. With 3 or more, the lowest must be within 1.0 of the median. If not, fix what the low judge named, or add a judge in a new round.
+4. The weakest dimension and the top gaps become the next round's focus.
+5. Never edit a judge's file. Never re-run a judge until you like the number. Fix the work instead.

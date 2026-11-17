@@ -1,0 +1,28 @@
+[
+  {
+    "name": "contact form submits and shows the thank-you text",
+    "page": "/",
+    "viewport": "desktop",
+    "steps": [
+      { "fill": { "label": "Name", "value": "Test User" } },
+      { "fill": { "label": "Email", "value": "test@example.com" } },
+      { "fill": { "label": "Message", "value": "Hello from the probe" } },
+      { "click": { "role": "button", "name": "Send" } }
+    ],
+    "expect": [
+      { "request": "/api/contact" },
+      { "text": "Thanks" }
+    ]
+  },
+  {
+    "name": "mobile menu opens and shows the nav links",
+    "page": "/",
+    "viewport": "mobile",
+    "steps": [
+      { "click": { "role": "button", "name": "Menu" } }
+    ],
+    "expect": [
+      { "visible": { "role": "link", "name": "Pricing" } }
+    ]
+  }
+]
