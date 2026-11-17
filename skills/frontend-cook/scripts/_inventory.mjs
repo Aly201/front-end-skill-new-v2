@@ -116,10 +116,21 @@ export async function inventoryOfUrl(browser, url, vpName = 'desktop') {
 export function diffInventory(base, now, waivedTexts = []) {
   const b = base || {};
   const n = now || {};
-  const waived = (waivedTexts || []).map((l) => String(l).toLowerCase());
+  // Compare with punctuation and dashes as spaces, so quoting old copy loosely still counts.
+  const loose = (x) => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}/:.#?=&_-]+/gu, ' ').replace(/[-_]{2,}/g, ' ').replace(/\s+/g, ' ').trim();
+  const words = (x) => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const waived = (waivedTexts || []).map((l) => ({
+    raw: String(l).toLowerCase(),
+    loose: loose(l),
+    // Quoted fragments of 3+ words ("Unlock the power of rope") waive any item whose text contains them.
+    quotes: [...String(l).matchAll(/["“”'‘’]([^"“”‘’]{3,})["“”'‘’]/g)]
+      .map((m) => words(m[1])).filter((q) => q.split(' ').length >= 3),
+  }));
   const isWaived = (...cands) => cands.some((c) => {
     const s = norm(c);
-    return s && waived.some((l) => l.includes(s));
+    if (!s) return false;
+    const ls = loose(c), ws = words(c);
+    return waived.some((l) => l.raw.includes(s) || (ls && l.loose.includes(ls)) || l.quotes.some((q) => ws.includes(q)));
   });
   const out = [];
   const add = (kind, message) => out.push({ severity: 'error', kind, message });

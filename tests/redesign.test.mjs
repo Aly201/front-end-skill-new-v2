@@ -492,3 +492,13 @@ describe('probe check, mocks, --probes-only and dirty_files', { skip: pw ? false
     });
   });
 });
+
+test('a copy change quoted loosely (3+ words) waives the reworded heading, nothing else', async () => {
+  const { diffInventory } = await import('../skills/frontend-cook/scripts/_inventory.mjs');
+  const base = { headings: [{ level: 1, text: 'Unlock the power of rope — seamlessly' }], links: [], forms: [{ id: 'contact', fields: [{ name: 'email' }] }] };
+  const now = { headings: [{ level: 1, text: 'Rope for boats that get used.' }], links: [], forms: [{ id: 'contact', fields: [] }] };
+  const msgs = (w) => diffInventory(base, now, w).map((x) => x.message);
+  assert.deepEqual(msgs(['h1 "Unlock the power of rope" becomes a real headline']), ['lost form field "email" in form "contact"']);
+  assert.equal(msgs(['"Unlock the" changed']).length, 2, 'two words are too loose to waive');
+  assert.equal(msgs(['the logo is bigger']).length, 2);
+});
