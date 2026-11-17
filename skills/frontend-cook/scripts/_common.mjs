@@ -165,7 +165,7 @@ export function isMain(metaUrl) {
 // Animation code. Banned in the mockup and the static build (step 6a), allowed from step 6b.
 // Hover and focus transitions are allowed in static: they are states, not animation.
 // The last alternative catches transitions of 500ms or longer (hover and focus transitions are shorter).
-export const MOTION_CODE = /@keyframes|\banimation(?:-name)?\s*:|\bgsap\b|framer-motion|['"]motion\/react['"]|\bfrom\s+['"]motion['"]|\banimate-(?!none\b)[a-z]|\blenis\b|ScrollTrigger|useSpring|\.animate\(\s*[\[{]|\bview-timeline|\bscroll-timeline|animation-timeline|IntersectionObserver|requestAnimationFrame|data-aos|<marquee|\banime(?:js)?\b|react-spring|locomotive-scroll|tailwindcss-animate|\bwhileInView\b|\bwhileHover\b|<motion\.|\btransition(?:-duration)?\s*:[^;}]*?(?:\s|:|,)(?:[5-9]\d\dms|[1-9]\d{3,}ms|0?\.[5-9]\d*s|[1-9][\d.]*s)\b/;
+export const MOTION_CODE = /@keyframes|\banimation(?:-name)?\s*:|\bgsap\b|framer-motion|['"]motion\/react['"]|\bfrom\s+['"]motion['"]|\banimate-(?!none\b)[a-z]|\blenis\b|ScrollTrigger|useSpring|\.animate\(\s*[\[{]|\bview-timeline|\bscroll-timeline|animation-timeline|IntersectionObserver|requestAnimationFrame|data-aos|<marquee|['"]animejs['"]|\banime\(|react-spring|locomotive-scroll|tailwindcss-animate|\bwhileInView\b|\bwhileHover\b|<motion\.|\btransition(?:-duration)?\s*:[^;}]*?(?:\s|:|,)(?:[5-9]\d\dms|[1-9]\d{3,}ms|0?\.[5-9]\d*s|[1-9][\d.]*s)\b/;
 export const FRONTEND_EXT = ['.html', '.htm', '.css', '.scss', '.sass', '.less', '.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.mdx'];
 
 // The activity ledger the guard hook writes: one JSON object per line.
@@ -193,3 +193,81 @@ export function activeHours(events, gapMin = 15) {
   for (let i = 1; i < t.length; i++) { const d = t[i] - t[i - 1]; if (d <= gapMin * 60000) ms += d; }
   return ms / 3600000;
 }
+
+// ---------- shared contracts for redesign mode (see references/redesign.md) ----------
+import { createHash as _createHash } from 'node:crypto';
+
+// Stable id for one line of code: sha1 of the trimmed text, 12 hex chars. Used to allow
+// specific existing motion lines (GATES.json motion_allow) and to fingerprint findings.
+export function lineHash(text) {
+  return _createHash('sha1').update(String(text).trim()).digest('hex').slice(0, 12);
+}
+
+const PROSE_EXT = ['.md', '.mdx', '.txt'];
+// Lines that are only a comment do not count as motion code.
+function isCommentLine(t) { return /^(\/\/|\/\*|\*|<!--|#\s)/.test(t.trim()); }
+
+// Every animation-code line in a text: [{ line (1-based), text, hash }]. Prose files and comment
+// lines are skipped. ext is the file extension including the dot ('' = treat as code).
+export function motionHits(text, ext = '') {
+  if (PROSE_EXT.includes(String(ext).toLowerCase())) return [];
+  const out = [];
+  String(text || '').split('\n').forEach((l, i) => {
+    if (!l.trim() || isCommentLine(l)) return;
+    if (MOTION_CODE.test(l)) out.push({ line: i + 1, text: l.trim().slice(0, 160), hash: lineHash(l) });
+  });
+  return out;
+}
+
+// Motion hits that are not allowed. allow = GATES.json motion_allow: [{ file, hash, reason }].
+// file is project-relative with forward slashes.
+export function unallowedMotion(text, ext, relFile, allow = []) {
+  const ok = new Set((allow || []).filter((a) => a.file === relFile).map((a) => a.hash));
+  return motionHits(text, ext).filter((h) => !ok.has(h.hash));
+}
+
+// URL compare without trailing-slash or default-port noise.
+export function normUrl(u) {
+  try {
+    const x = new URL(u);
+    let p = x.pathname.replace(/\/index\.html?$/i, '/');
+    if (p.length > 1) p = p.replace(/\/+$/, '');
+    return `${x.protocol}//${x.host}${p || '/'}${x.search}`;
+  } catch { return String(u || '').replace(/\/+$/, ''); }
+}
+
+// Full URL of a page path ('/', '/pricing') on a base URL ('http://localhost:5173' or a file: URL of a folder).
+export function pageUrl(base, page = '/') {
+  if (!page || page === '/') return base;
+  if (/^https?:/i.test(page)) return page;
+  return new URL(page.replace(/^\//, ''), base.endsWith('/') ? base : base + '/').href;
+}
+
+// File-name slug for a page path: '/' -> 'home', '/pricing/plans' -> 'pricing-plans'.
+export function pageSlug(page = '/') {
+  const s = String(page).replace(/^https?:\/\/[^/]+/i, '').replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  return s || 'home';
+}
+
+// The project root for an edited file: walk up from the file, then from cwd.
+export function rootForFile(file, cwd = process.cwd()) {
+  const fromFile = file ? projectRoot(dirname(resolve(cwd, file))) : null;
+  if (fromFile && existsSync(join(fromFile, STATE_DIR, 'GATES.json'))) return fromFile;
+  return projectRoot(cwd);
+}
+
+// Simple glob ('src/legacy/**', '**/*.test.*') to a RegExp over forward-slash relative paths.
+export function globToRe(glob) {
+  const g = String(glob).replace(/\\/g, '/');
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*' && g[i + 1] === '*') { re += '.*'; i++; if (g[i + 1] === '/') i++; }
+    else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else re += c.replace(/[.+^${}()|[\]]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`);
+}
+
+export function readGates(root) { return readJson(join(root, STATE_DIR, 'GATES.json'), null); }
