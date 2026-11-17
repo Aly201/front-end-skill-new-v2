@@ -3,7 +3,7 @@
 // Run: node --test tests/redesign.test.mjs
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -16,8 +16,17 @@ const pw = loadPlaywright();
 const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 const LONG = 300000;
 
+// Async, not spawnSync: the test process serves the fixture site, so it must keep its event loop running.
 function script(name, args, cwd) {
-  return spawnSync(process.execPath, [join(SCRIPTS, name), ...args], { cwd, encoding: 'utf8', timeout: LONG });
+  return new Promise((ok) => {
+    const p = spawn(process.execPath, [join(SCRIPTS, name), ...args], { cwd });
+    let stdout = '';
+    let stderr = '';
+    p.stdout.on('data', (d) => { stdout += d; });
+    p.stderr.on('data', (d) => { stderr += d; });
+    const timer = setTimeout(() => p.kill(), LONG);
+    p.on('close', (status) => { clearTimeout(timer); ok({ status, stdout, stderr }); });
+  });
 }
 
 // ---------- inventory diff (no browser) ----------
@@ -188,8 +197,8 @@ describe('redesign baseline and regress', { skip: pw ? false : 'Playwright not i
     if (root) rmSync(root, { recursive: true, force: true });
   });
 
-  test('baseline.mjs writes the baseline files and the inventory', { timeout: LONG }, () => {
-    const r = script('baseline.mjs', ['--allow-dirty'], root);
+  test('baseline.mjs writes the baseline files and the inventory', { timeout: LONG }, async () => {
+    const r = await script('baseline.mjs', ['--allow-dirty'], root);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     const dir = join(root, 'cook', 'baseline');
     for (const f of ['meta.json', 'inventory.json', 'motion.json', 'checks.json', 'slop.json', 'audit-home.json', 'audit-pricing-html.json']) {
@@ -206,8 +215,8 @@ describe('redesign baseline and regress', { skip: pw ? false : 'Playwright not i
     assert.deepEqual(checks.map((c) => c.code), [0, 0, 1]);
   });
 
-  test('regress on the unchanged site is ok', { timeout: LONG }, () => {
-    const r = script('regress.mjs', ['--out', 'cook/reports/regress-r01.json'], root);
+  test('regress on the unchanged site is ok', { timeout: LONG }, async () => {
+    const r = await script('regress.mjs', ['--out', 'cook/reports/regress-r01.json'], root);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     const rep = report('regress-r01.json');
     assert.equal(rep.ok, true);
@@ -217,18 +226,18 @@ describe('redesign baseline and regress', { skip: pw ? false : 'Playwright not i
     assert.ok(rep.findings.some((f) => f.severity === 'warning' && f.message.includes(CHECK_ALWAYS_FAIL)));
   });
 
-  test('a removed form field is a lost form field error', { timeout: LONG }, () => {
+  test('a removed form field is a lost form field error', { timeout: LONG }, async () => {
     writeSite(root, { email: false, wired: true });
-    const r = script('regress.mjs', ['--out', 'cook/reports/regress-r02.json'], root);
+    const r = await script('regress.mjs', ['--out', 'cook/reports/regress-r02.json'], root);
     assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`);
     const rep = report('regress-r02.json');
     assert.equal(rep.ok, false);
     assert.ok(rep.findings.some((f) => f.severity === 'error' && f.check === 'inventory' && /lost form field "email"/.test(f.message)));
   });
 
-  test('a Dropped line in KEEP.md waives the lost field', { timeout: LONG }, () => {
+  test('a Dropped line in KEEP.md waives the lost field', { timeout: LONG }, async () => {
     writeFileSync(join(root, 'cook', 'baseline', 'KEEP.md'), KEEP_DROP_EMAIL);
-    const r = script('regress.mjs', ['--out', 'cook/reports/regress-r03.json'], root);
+    const r = await script('regress.mjs', ['--out', 'cook/reports/regress-r03.json'], root);
     // The probe still fills the removed email box, so the run still fails; the inventory must not.
     const rep = report('regress-r03.json');
     assert.equal(r.status, 1);
@@ -236,21 +245,21 @@ describe('redesign baseline and regress', { skip: pw ? false : 'Playwright not i
     assert.ok(rep.findings.some((f) => f.check === 'probe' && f.severity === 'error'));
   });
 
-  test('breaking the submit script fails the probe', { timeout: LONG }, () => {
+  test('breaking the submit script fails the probe', { timeout: LONG }, async () => {
     writeSite(root, { email: true, wired: false });
     writeFileSync(join(root, 'cook', 'baseline', 'KEEP.md'), KEEP_EMPTY);
-    const r = script('regress.mjs', ['--out', 'cook/reports/regress-r04.json'], root);
+    const r = await script('regress.mjs', ['--out', 'cook/reports/regress-r04.json'], root);
     assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`);
     const rep = report('regress-r04.json');
     assert.equal(rep.probes[0].ok, false);
     assert.ok(rep.findings.some((f) => f.check === 'probe' && f.severity === 'error'));
   });
 
-  test('a check that passed on the baseline and fails now is an error; one that already failed is not', { timeout: LONG }, () => {
+  test('a check that passed on the baseline and fails now is an error; one that already failed is not', { timeout: LONG }, async () => {
     writeSite(root, { email: true, wired: true });
     writeFileSync(join(root, 'flag.txt'), 'x');
     try {
-      const r = script('regress.mjs', ['--out', 'cook/reports/regress-r05.json'], root);
+      const r = await script('regress.mjs', ['--out', 'cook/reports/regress-r05.json'], root);
       assert.equal(r.status, 1, `${r.stdout}\n${r.stderr}`);
       const rep = report('regress-r05.json');
       const errs = rep.findings.filter((f) => f.severity === 'error' && f.check === 'checks');
@@ -267,7 +276,7 @@ describe('redesign baseline and regress', { skip: pw ? false : 'Playwright not i
 // ---------- pair.mjs: blind A/B pairs from fake fold stills ----------
 
 describe('pair.mjs', { skip: hasFfmpeg ? false : 'ffmpeg not installed' }, () => {
-  test('writes one pair per page and viewport with a key that names the new side', { timeout: LONG }, () => {
+  test('writes one pair per page and viewport with a key that names the new side', { timeout: LONG }, async () => {
     const root = mkdtempSync(join(tmpdir(), 'redesign-pair-'));
     try {
       mkdirSync(join(root, 'cook'), { recursive: true });
@@ -284,7 +293,7 @@ describe('pair.mjs', { skip: hasFfmpeg ? false : 'ffmpeg not installed' }, () =>
           assert.equal(make(join(round, `${slug}-${vp}-fold.png`), 'blue').status, 0);
         }
       }
-      const r = script('pair.mjs', ['--round', 'r01'], root);
+      const r = await script('pair.mjs', ['--round', 'r01'], root);
       assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
       assert.ok(!r.stdout.includes('"new"'), 'the key must not be printed');
 
