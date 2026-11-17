@@ -13,6 +13,8 @@
 //   set-strategy --in-place | --rebuild --quote "<user words>"
 //   motion-allow <file> <hash> --reason "..." --quote "<user words>"
 //                                         allow one existing animation line (hash from motion.json)
+//   motion-allow <file> --text '<line>' --reason "..." --quote "<user words>"
+//                                         allow a line before it is written (its hash is stored)
 //   allow-dirty --quote "<user words>"    the baseline may be taken on a dirty tree
 //   status                                every step, its state and the next step
 //   check <step>                          may this step start? (previous steps passed, inputs present)
@@ -40,7 +42,7 @@ import { join, resolve, extname, basename, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, unallowedMotion, pageSlug, pageUrl, normUrl, isDesignFile, globToRe } from './_common.mjs';
+import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, unallowedMotion, pageSlug, pageUrl, normUrl, isDesignFile, globToRe, lineHash } from './_common.mjs';
 
 export const STEPS = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 // An existing site (mode redesign) starts with the baseline, step 0b.
@@ -386,6 +388,28 @@ function baselineChecks(g) {
       const ok = acting.some((p) => p.page === page);
       out.push([ok, ok ? `a probe covers the form(s) on ${page}` : `no probe on ${page} for its ${n} form(s): add one to cook/baseline/probes.json with "page": "${page}"`]);
     }
+  }
+  // probecheck.json (baseline.mjs --probes-only): every probe in probes.json has a row, the rows are at least as
+  // new as probes.json, and every row proves something (an expectation false before the steps and true after).
+  const pcPath = B('probecheck.json');
+  const rows = readJson(pcPath);
+  if (!existsSync(pcPath)) out.push([false, 'cook/baseline/probecheck.json missing: run node baseline.mjs --probes-only'])
+  else if (!Array.isArray(rows)) out.push([false, 'cook/baseline/probecheck.json is not a JSON array: run node baseline.mjs --probes-only'])
+  else {
+    if (Array.isArray(probes) && mtime(pcPath) < mtime(B('probes.json'))) {
+      out.push([false, 'cook/baseline/probecheck.json is older than probes.json: run node baseline.mjs --probes-only']);
+    }
+    if (Array.isArray(probes)) {
+      const names = probes.map((p, i) => p?.name || `probe ${i + 1}`);
+      const have = new Set(rows.map((r) => r?.name));
+      const missing = names.filter((n) => !have.has(n));
+      if (missing.length) out.push([false, `probecheck.json has no row for: ${missing.join(', ')}: run node baseline.mjs --probes-only`]);
+    }
+    const weak = rows.filter((r) => r?.proves !== true);
+    for (const r of weak) {
+      out.push([false, `probe ${r?.name} proves nothing: its expectation already holds before the steps${r?.error ? ` (or it errored: ${r.error})` : ''}. Fix the probe and run baseline.mjs --probes-only`]);
+    }
+    if (!weak.length && rows.length) out.push([true, `probecheck.json: all ${rows.length} probe(s) prove something`]);
   }
   out.push(C.approval(g, 'baseline'));
   return out;
@@ -744,9 +768,21 @@ function designGitCheck(g) {
   if (diff.status !== 0 || untracked.status !== 0) return [true, `${label}: not measured: not a git repo (git could not compare with ${commit.slice(0, 12)})`];
   const names = (text) => String(text).split('\n').map((l) => l.trim().replace(/\\/g, '/')).filter(Boolean);
   const changed = [...new Set([...names(diff.stdout), ...names(untracked.stdout)])];
-  const design = changed.filter((x) => isDesignFile(x, g));
+  // Files already dirty when the baseline was taken (sha1 of their content then) are not new edits, as long as
+  // their content is still the same. g.baseline.dirty_files, or cook/baseline/meta.json when g.baseline lacks the file.
+  const metaDirty = readJson(S('baseline', 'meta.json'))?.dirty_files || {};
+  const preDirty = (x) => {
+    const known = g.baseline?.dirty_files?.[x] ?? metaDirty[x];
+    if (!known) return false;
+    try { return createHash('sha1').update(readFileSync(resolve(root, x))).digest('hex') === known; } catch { return false; }
+  };
+  const ignored = changed.filter((x) => isDesignFile(x, g) && preDirty(x));
+  const design = changed.filter((x) => isDesignFile(x, g) && !ignored.includes(x));
+  const why = ignored.length
+    ? `${ignored.length} already dirty at the baseline and unchanged since, the rest not design`
+    : 'none of them design';
   return design.length === 0
-    ? [true, `${label}: none changed (${changed.length} file(s) in scope changed, none of them design)`]
+    ? [true, `${label}: none changed (${changed.length} file(s) in scope changed, ${why})`]
     : [false, `design files changed before the mockup passed: ${design.join(', ')}`];
 }
 
@@ -917,7 +953,10 @@ if (isMainRun) {
       if (!project) fail('init needs --project <name>');
       const mode = opt('--mode', 'new');
       if (!['new', 'redesign'].includes(mode)) fail('init --mode new|redesign');
-      const srcs = optAll('--src'), excludes = optAll('--exclude');
+      const srcs = optAll('--src');
+      // Stored as the gate compares them: no leading ./ and no trailing /, so ./src/legacy/ is src/legacy.
+      const excludes = optAll('--exclude').map((x) => String(x).trim().replace(/^\.\//, '').replace(/\/+$/, ''));
+      if (excludes.some((x) => !x)) fail('init --exclude needs a folder or glob, e.g. --exclude src/legacy/');
       const url = opt('--url');
       const pagesArg = opt('--pages');
       const pages = pagesArg === null ? ['/'] : parsePages(pagesArg);
@@ -973,7 +1012,8 @@ if (isMainRun) {
       if (ok) {
         g.steps[a1] = { status: 'passed', at: new Date().toISOString(), evidence: done.map(([, m]) => m) };
         // The baseline's commit and tree state travel with the gates, for the final report and the regress check.
-        if (a1 === '0b') { const m = readJson(S('baseline', 'meta.json')) || {}; g.baseline = { commit: m.commit ?? null, dirty: m.dirty === true, at: m.at ?? null }; }
+        // dirty_files: the pre-existing changes of a dirty baseline, so verify 5 can tell them from new edits.
+        if (a1 === '0b') { const m = readJson(S('baseline', 'meta.json')) || {}; g.baseline = { commit: m.commit ?? null, dirty: m.dirty === true, at: m.at ?? null, dirty_files: m.dirty_files && typeof m.dirty_files === 'object' ? m.dirty_files : {} }; }
         save(g); console.log(`Step ${a1} marked PASSED.`);
       }
       process.exit(ok ? 0 : 1);
@@ -1103,19 +1143,34 @@ if (isMainRun) {
     }
     case 'motion-allow': {
       const g = load();
-      const file = a1, hash = argv[2];
-      if (!file || !hash || hash.startsWith('--')) fail('motion-allow <file> <hash> --reason "..." --quote "<user words>" (the hash is in cook/baseline/motion.json)');
+      const file = a1;
+      const usage = 'motion-allow <file> <hash> | <file> --text \'<line>\' --reason "..." --quote "<user words>" (the hash is in cook/baseline/motion.json)';
+      // Exactly one of <hash> (an existing line, from motion.json) or --text (a line that may not exist yet).
+      const text = opt('--text');
+      const hashArg = argv[2] && !argv[2].startsWith('--') ? argv[2] : null;
+      if (!file || file.startsWith('--')) fail(usage);
+      if ((text === null) === (hashArg === null)) fail(`motion-allow takes exactly one of <hash> or --text: ${usage}`);
       const reason = opt('--reason');
       if (!reason || !reason.trim()) fail('motion-allow needs a --reason (why this existing motion is functional)');
       // Only the user can say which motion is functional: their words, typed in this project.
       const q = opt('--quote');
       needUserWords(q);
       const abs = resolve(root, file);
-      let text = null;
-      try { text = readFileSync(abs, 'utf8'); } catch { /* missing */ }
-      if (text === null) fail(`file not found: ${file}`);
       const rel = relative(root, abs).split(sep).join('/');
-      const hits = motionHits(text, extname(abs).toLowerCase());
+      if (text !== null) {
+        // The hash of the line as motionHits computes it (trimmed), stored with the line's text for the record.
+        if (!text.trim()) fail('motion-allow --text needs the line of code to allow');
+        const hash = lineHash(text);
+        g.motion_allow = [...(g.motion_allow || []).filter((a) => !(a.file === rel && a.hash === hash)), { file: rel, hash, reason: reason.trim(), quote: q.trim(), text: text.trim() }];
+        save(g);
+        console.log(`allowed ${rel} line hash ${hash} (before it is written): ${reason.trim()}`);
+        break;
+      }
+      const hash = hashArg;
+      let src = null;
+      try { src = readFileSync(abs, 'utf8'); } catch { /* missing */ }
+      if (src === null) fail(`file not found: ${file} (to allow a line before it exists, use --text)`);
+      const hits = motionHits(src, extname(abs).toLowerCase());
       if (!hits.some((h) => h.hash === hash)) fail(`${rel} has no animation line with hash ${hash}. Hashes in this file: ${hits.map((h) => `${h.hash} (line ${h.line})`).join(', ') || 'none'}`);
       g.motion_allow = [...(g.motion_allow || []).filter((a) => !(a.file === rel && a.hash === hash)), { file: rel, hash, reason: reason.trim(), quote: q.trim() }];
       save(g);

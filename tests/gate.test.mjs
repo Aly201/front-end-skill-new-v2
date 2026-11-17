@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, read
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { lineHash, pageUrl } from '../skills/frontend-cook/scripts/_common.mjs';
 
 const SCRIPTS = resolve(import.meta.dirname, '..', 'skills', 'frontend-cook', 'scripts');
@@ -499,6 +499,8 @@ const KEEP = (motionRows = '', dropped = '- none', copy = '- none') =>
   `## Keep\n- Contact form: "the contact form must still send"\n\n## Dropped\n${dropped}\n\n## Copy changes\n${copy}\n\n## Motion\n| file:line | hash | functional/decorative | keep/replace/remove |\n|---|---|---|---|\n${motionRows}\n`;
 const FORM_PROBE = (page) => [{ name: 'contact form submits', page, viewport: 'desktop',
   steps: [{ fill: { label: 'Email', value: 'a@b.co' } }, { click: { role: 'button', name: 'Send' } }], expect: [{ text: 'Thanks' }] }];
+// What baseline.mjs --probes-only writes for FORM_PROBE: its expectation is false before the steps and true after.
+const PROBE_ROWS = [{ name: 'contact form submits', page: '/', viewport: 'desktop', before: [false], after: [true], proves: true }];
 
 test('redesign: init needs --src and --url, status lists step 0b, a new project has no 0b', () => {
   const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-init-')));
@@ -558,6 +560,8 @@ test('redesign: step 0b refuses each missing piece of the baseline, then passes'
   assert.match(v().out, /no probe on \/ for its 1 form\(s\)/);
   write(B('probes.json'), JSON.stringify(FORM_PROBE('/')));
   assert.match(v().out, /PASS {2}a probe covers the form\(s\) on \//);
+  assert.match(v().out, /probecheck\.json missing: run node baseline\.mjs --probes-only/);
+  write(B('probecheck.json'), JSON.stringify(PROBE_ROWS));
 
   // No approval; words not typed are refused; then the approval counts.
   assert.match(v().out, /user has not approved the baseline yet/);
@@ -576,7 +580,7 @@ test('redesign: step 0b refuses each missing piece of the baseline, then passes'
   assert.equal(r.code, 0, r.out);
   const G = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
   assert.equal(G.steps['0b'].status, 'passed');
-  assert.deepEqual(G.baseline, { commit: 'abc1234def', dirty: true, at: meta.at });
+  assert.deepEqual(G.baseline, { commit: 'abc1234def', dirty: true, at: meta.at, dirty_files: {} });
   assert.equal(runGate(d, ['check', '1']).code, 0, 'step 1 may start after step 0b');
 
   // Stills changed after the approval: it no longer counts.
@@ -735,6 +739,98 @@ test('redesign: verify 5 refuses design file changes after the baseline commit, 
   assert.match(line(), /FAIL {2}design files changed before the mockup passed: src\/App\.jsx$/);
   write(join(d, 'src', 'Hero.jsx'), 'export const Hero = () => null;\n');
   assert.match(line(), /design files changed before the mockup passed: src\/App\.jsx, src\/Hero\.jsx$/, 'an untracked design file counts');
+});
+
+test('redesign: motion-allow --text allows a line before it is written; its hash stops counting once the line is written', () => {
+  const d = redesignProject();
+  const TEXT = '@keyframes fade { to { opacity: 1; } }';
+  const G = () => JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  const allow = (...extra) => runGate(d, ['motion-allow', 'site/new.css', '--text', TEXT, '--reason', 'fade in', ...extra]);
+  assert.equal(allow().code, 2, 'the user words are required');
+  assert.equal(allow('--quote', 'the fade must stay').code, 2, 'words not typed are refused');
+  say('the fade must stay', d);
+  assert.equal(allow('--quote', 'the fade must stay').code, 0);
+  assert.deepEqual(G().motion_allow, [{ file: 'site/new.css', hash: lineHash(TEXT), reason: 'fade in', quote: 'the fade must stay', text: TEXT }]);
+  assert.equal(runGate(d, ['motion-allow', 'site/new.css', lineHash(TEXT), '--text', TEXT, '--reason', 'x', '--quote', 'the fade must stay']).code, 2, 'a hash and --text together are refused');
+  assert.equal(runGate(d, ['motion-allow', 'site/new.css', '--reason', 'x', '--quote', 'the fade must stay']).code, 2, 'a hash or --text is required');
+
+  const anim = () => lineWith(runGate(d, ['verify', '6b']).out, /animation code in the build|the build has no animation code yet/);
+  write(join(d, 'site', 'new.css'), `  ${TEXT}\n`);      // indented: the hash is of the trimmed line
+  write(join(d, 'site', 'other.css'), `${TEXT}\n`);     // the same line, not allowed
+  assert.match(anim(), /other\.css:1/, 'a line that is not allowed still counts');
+  assert.doesNotMatch(anim(), /new\.css/, 'the allowed line no longer counts once it is written');
+});
+
+test('redesign: verify 0b needs probecheck.json with a row per probe, at least as new as probes.json, and every row proving something', () => {
+  const d = redesignProject();
+  baselineCapture(d);
+  write(join(d, 'cook', 'baseline', 'KEEP.md'), KEEP(`| site/app.css:1 | ${HIT_HASH} | decorative | remove |`));
+  const B = (...p) => join(d, 'cook', 'baseline', ...p);
+  const out = () => runGate(d, ['verify', '0b']).out;
+  const line = (re) => lineWith(out(), re);
+  // Both files written; probecheck is newer unless the test makes probes.json newer.
+  const state = (probes, rows, older = false) => {
+    write(B('probes.json'), JSON.stringify(probes));
+    write(B('probecheck.json'), JSON.stringify(rows));
+    if (older) later(B('probes.json')); else later(B('probecheck.json'));
+  };
+  const SECOND = { name: 'menu opens', page: '/', viewport: 'desktop', steps: [{ click: { role: 'button', name: 'Menu' } }], expect: [{ visible: { role: 'navigation' } }] };
+
+  state(FORM_PROBE('/'), [{ ...PROBE_ROWS[0], before: [true], proves: false }]);
+  assert.match(line(/probe contact form submits/), /FAIL {2}probe contact form submits proves nothing: its expectation already holds before the steps\. Fix the probe and run baseline\.mjs --probes-only$/);
+
+  state(FORM_PROBE('/'), [{ ...PROBE_ROWS[0], before: [false], after: [false], proves: false, error: 'steps: timeout waiting for Send' }]);
+  assert.match(line(/probe contact form submits/), /FAIL {2}probe contact form submits proves nothing: its expectation already holds before the steps \(or it errored: steps: timeout waiting for Send\)\. Fix the probe/);
+
+  state(FORM_PROBE('/'), PROBE_ROWS, true);
+  assert.match(line(/probecheck\.json/), /FAIL {2}cook\/baseline\/probecheck\.json is older than probes\.json: run node baseline\.mjs --probes-only$/);
+
+  state([...FORM_PROBE('/'), SECOND], PROBE_ROWS);
+  assert.match(line(/probecheck\.json/), /FAIL {2}probecheck\.json has no row for: menu opens: run node baseline\.mjs --probes-only$/);
+
+  state([...FORM_PROBE('/'), SECOND], [...PROBE_ROWS, { ...PROBE_ROWS[0], name: 'menu opens' }]);
+  assert.match(out(), /PASS {2}probecheck\.json: all 2 probe\(s\) prove something/);
+  assert.doesNotMatch(out(), /FAIL {2}probe /);
+
+  rmSync(B('probecheck.json'));
+  assert.match(line(/probecheck/), /FAIL {2}cook\/baseline\/probecheck\.json missing: run node baseline\.mjs --probes-only$/);
+});
+
+test('redesign: verify 5 ignores a design file that was already dirty at the baseline, until its content changes again', () => {
+  const d = gitRedesign();
+  const hash = (f) => createHash('sha1').update(readFileSync(join(d, f))).digest('hex');
+  const line = () => lineWith(runGate(d, ['verify', '5']).out, /design files/);
+  const PASS = /PASS {2}design files vs the baseline commit: none changed \(1 file\(s\) in scope changed, 1 already dirty at the baseline and unchanged since, the rest not design\)/;
+  const FAIL = /FAIL {2}design files changed before the mockup passed: src\/App\.jsx$/;
+
+  write(join(d, 'src', 'App.jsx'), 'export default function App() { return <h1>Rope, dirty</h1>; }\n');
+  assert.match(line(), FAIL);
+  // Recorded at the baseline in cook/baseline/meta.json (g.baseline has no entry for the file yet).
+  write(join(d, 'cook', 'baseline', 'meta.json'), JSON.stringify({ dirty: true, dirty_files: { 'src/App.jsx': hash('src/App.jsx') } }));
+  assert.match(line(), PASS);
+  write(join(d, 'src', 'App.jsx'), 'export default function App() { return <h1>Rope, edited</h1>; }\n');
+  assert.match(line(), FAIL, 'a change after the baseline counts again');
+
+  // Copied into g.baseline (verify 0b does this); the current content is the recorded one.
+  const G = join(d, 'cook', 'GATES.json');
+  const g = JSON.parse(readFileSync(G, 'utf8'));
+  g.baseline.dirty_files = { 'src/App.jsx': hash('src/App.jsx') };
+  write(G, JSON.stringify(g));
+  assert.match(line(), PASS);
+  write(join(d, 'src', 'App.jsx'), 'export default function App() { return <h1>Rope, again</h1>; }\n');
+  assert.match(line(), FAIL);
+});
+
+test('redesign: init --exclude stores each pattern without a leading ./ or a trailing /', () => {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-excl-')));
+  write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  write(join(d, 'src', 'index.html'), page('<h1>x</h1>'));
+  const init = (...ex) => runGate(d, ['init', '--project', 'E', '--mode', 'redesign', '--src', 'src', ...ex, '--url', 'http://localhost:5173']);
+  assert.equal(init('--exclude', './').code, 2, 'an empty pattern is refused');
+  assert.equal(existsSync(join(d, 'cook', 'GATES.json')), false);
+  assert.equal(init('--exclude', './src/legacy/', '--exclude', 'src/vendor/**').code, 0);
+  const G = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  assert.deepEqual(G.scope.exclude, ['src/legacy', 'src/vendor/**']);
 });
 
 test('redesign: the step 5 slop scan and every round need the baseline and the excludes, over every source folder', () => {
