@@ -377,3 +377,12 @@ test('motion: a brand-new motion line gets the --text form of motion-allow, an o
   assert.match(again.err, new RegExp(`motion-allow src/lazy\\.js ${lineHash(line)} --reason .* --quote`),
     'the line is on disk, so the hash form is given');
 });
+
+test('found on a real repo: building the baseline side-by-side reads frozen stills and is allowed; writing them is not', () => {
+  const p = mkdtempSync(join(tmpdir(), 'guard-sbs-'));
+  mkdirSync(join(p, 'cook', 'baseline', 'stills'), { recursive: true });
+  writeFileSync(join(p, 'cook', 'GATES.json'), JSON.stringify({ mode: 'redesign', steps: { 0: { status: 'passed' } } }));
+  const bash = (command) => spawnSync(process.execPath, [GUARD], { input: JSON.stringify({ cwd: p, session_id: 's', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } }), encoding: 'utf8' }).status;
+  assert.equal(bash('mkdir -p cook/compare/baseline && node /x/cook/scripts/side-by-side.mjs --out cook/compare/baseline/all.jpg cook/refs/R01.png cook/baseline/stills/home-desktop-fold.png'), 0);
+  assert.equal(bash('cp /tmp/x.png cook/baseline/stills/home-desktop-fold.png'), 2);
+});
