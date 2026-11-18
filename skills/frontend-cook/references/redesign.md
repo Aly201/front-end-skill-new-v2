@@ -72,6 +72,8 @@ Selectors are by role and name, or by label or text, never by class or DOM path.
 
 Steps: `click`, `fill`, `select` (a dropdown: `{ "select": { "label": "Compound", "option": "Palm Hills October" } }`), `hover`, `press`, `wait`.
 
+Brand rules: when the site has an approved design system (a DESIGN.md, a brand book), record its key rules as `brand_constraints` in `cook/bans.json`, each with the user's words: `{ "rule": "dark graphite ground, no cards or shadows, one gold accent", "quote": "keep our approved design system" }`. Judges read them and score execution within the brand instead of marking the brand down. To re-judge improved work (for example a revised mockup), first run `gate.mjs archive-judges <round>`.
+
 Rules for probes:
 - **Dev or staging only.** Probes run against a dev or staging URL, never production. A probe that submits a form changes real data there.
 - **Mock the submits.** A per-probe `"mock"` fulfils matching requests in the browser, so a form submit does not reach a real backend. It is opt-in, per probe: `"mock": [{ "url": "/api/contact", "status": 200, "body": "{\"ok\":true}" }]`. The `url` matches as a substring of the request URL, so keep it specific: a bare `/` would answer every request, including the page itself.

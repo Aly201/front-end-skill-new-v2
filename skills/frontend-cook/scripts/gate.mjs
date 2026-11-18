@@ -29,6 +29,7 @@
 //   set-build --src <dir> --url <url or file>
 //   set-motion (--none --quote "..." | --refs)
 //   no-feedback --quote "..."           the user saw the stills and wants no changes (step 7)
+//   archive-judges <round>              move a round's judge files to an archive folder (to re-judge new work)
 //   score <round>                         median of the judge files in cook/judge/<round>/, calibrated
 //   calibrate --user <score 0-10> --quote "<user's words with that number>"
 //   elapsed                               hours since the timer started
@@ -37,7 +38,7 @@
 //
 // Steps: 0 setup, 1 references, 2 mockup, 3 bar, 4 time, 5 bans, 6a static build,
 //        6b motion, 7 feedback, 8 separate judge.
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, renameSync } from 'node:fs';
 import { join, resolve, extname, basename, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -1322,6 +1323,20 @@ if (isMainRun) {
       needUserWords(q);
       g.no_feedback_quote = q; save(g);
       console.log(`recorded: user wants no changes: "${g.no_feedback_quote}"`);
+      break;
+    }
+    case 'archive-judges': {
+      // Retire a round's judge files (and its summary) after the work changed, so it can be judged again.
+      // Files are moved, never deleted: cook/judge/<round>/archive-<timestamp>/.
+      if (!a1) fail('archive-judges <round>');
+      const dir = S('judge', a1);
+      if (!existsSync(dir)) fail(`no folder cook/judge/${a1}`);
+      const files = readdirSync(dir).filter((f) => f.endsWith('.json'));
+      if (!files.length) { console.log(`nothing to archive in cook/judge/${a1}`); break; }
+      const to = join(dir, `archive-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+      mkdirSync(to, { recursive: true });
+      for (const f of files) renameSync(join(dir, f), join(to, f));
+      console.log(`moved ${files.length} file(s) to ${relative(root, to)}; judge the new version with fresh judges`);
       break;
     }
     case 'score': {

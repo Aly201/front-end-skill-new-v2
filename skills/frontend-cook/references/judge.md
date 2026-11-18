@@ -17,7 +17,8 @@ The builder never scores its own work. Judges are fresh: no history, no code, no
 - For motion rounds: `cook/stills/<round>/*-motion-strip.jpg` and the `.webm` path.
 - Redesign rounds only: `cook/compare/<round>/ab-*.jpg`, pairs of the old site and the round's build, side by side, with no labels. Left or right is random. Judges never learn which side is new.
 - Redesign baseline (step 1): `cook/compare/baseline/*.jpg` (reference left, old site right), scored into `cook/judge/baseline/`. No `ab` key: pairs are made only for rounds.
-- The bar numbers, this prompt and the `user_bans` list from `cook/bans.json`. Nothing else.
+- The bar numbers, this prompt, and the `user_bans` and `brand_constraints` lists from `cook/bans.json`. Nothing else.
+- `brand_constraints` (redesign of an existing brand, or a brand the user already has): the owner's approved rules, each with the user's words, e.g. `{ "rule": "dark graphite ground, no cards or shadows", "quote": "..." }`. Tell judges not to mark the work down for following them, and to score execution within them.
 
 ## The prompt
 
@@ -39,6 +40,7 @@ List any of these you see: beige, purple gradients, eyebrow labels, monospace up
 01/02/03 counters, glowing orbs, gradient text, emoji icons, stock-photo people, fake dashboards,
 three identical icon cards, everything centered, everything in rounded shadowed cards, grey low-contrast text,
 generic phrases like "Unlock the power", em dashes[, and the user's own bans: <user_bans from cook/bans.json>].
+[Approved brand rules, do NOT mark down for following them, judge execution within them: <brand_constraints from cook/bans.json>]
 
 [Redesign rounds only] Also look at each ab-*.jpg pair. Say which page is better, left or right, and why, in one line. Judge the page, not the position. The ab list is required for every pair listed in the round.
 

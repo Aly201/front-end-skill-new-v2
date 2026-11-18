@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, readFileSync, realpathSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, utimesSync, readFileSync, realpathSync, existsSync, rmSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
@@ -1231,4 +1231,18 @@ test('redesign: verify 5 reads the text of a .js file: an untracked component wi
   assert.match(line(), /PASS {2}design files vs the baseline commit: none changed \(1 file\(s\) in scope changed, none of them design\)/, 'plain logic is not design');
   write(join(d, 'src', 'components', 'Hero.js'), 'export const Hero = () => <div className="hero">Rope</div>;\n');
   assert.match(line(), /FAIL {2}design files changed before the mockup passed: src\/components\/Hero\.js$/);
+});
+
+test('found on a real repo: archive-judges retires a round so improved work can be judged again', () => {
+  const p = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-arch-')));
+  mkdirSync(join(p, 'cook', 'judge', 'mockup'), { recursive: true });
+  writeFileSync(join(p, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  spawnSync(process.execPath, [join(SCRIPTS, 'gate.mjs'), 'init', '--project', 'A'], { cwd: p });
+  for (const f of ['judge-A.json', 'judge-B.json', 'summary.json']) writeFileSync(join(p, 'cook', 'judge', 'mockup', f), '{}');
+  const r = spawnSync(process.execPath, [join(SCRIPTS, 'gate.mjs'), 'archive-judges', 'mockup'], { cwd: p, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const left = readdirSync(join(p, 'cook', 'judge', 'mockup'));
+  assert.equal(left.filter((f) => f.endsWith('.json')).length, 0);
+  const arch = left.find((f) => f.startsWith('archive-'));
+  assert.ok(arch && readdirSync(join(p, 'cook', 'judge', 'mockup', arch)).length === 3);
 });
