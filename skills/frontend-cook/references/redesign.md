@@ -70,6 +70,8 @@ Quoting rules for the Dropped and Copy changes lines. The gate checks them in `r
 
 Selectors are by role and name, or by label or text, never by class or DOM path. The redesign changes classes; a probe that depends on them fails for the wrong reason. Step formats: `click`, `fill`, `hover`, `press`, `wait`. Expectations: `visible`, `text`, `request`. Probes must pass on the baseline.
 
+Steps: `click`, `fill`, `select` (a dropdown: `{ "select": { "label": "Compound", "option": "Palm Hills October" } }`), `hover`, `press`, `wait`.
+
 Rules for probes:
 - **Dev or staging only.** Probes run against a dev or staging URL, never production. A probe that submits a form changes real data there.
 - **Mock the submits.** A per-probe `"mock"` fulfils matching requests in the browser, so a form submit does not reach a real backend. It is opt-in, per probe: `"mock": [{ "url": "/api/contact", "status": 200, "body": "{\"ok\":true}" }]`. The `url` matches as a substring of the request URL, so keep it specific: a bare `/` would answer every request, including the page itself.

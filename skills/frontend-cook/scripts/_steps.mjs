@@ -3,6 +3,7 @@
 //   { "click": { "role": "button", "name": "Menu" } }
 //   { "click": { "text": "Pricing" } }
 //   { "fill":  { "label": "Email", "value": "a@b.co" } }
+//   { "select": { "label": "Compound", "option": "Palm Hills October" } }   (a <select>: option by visible label or value)
 //   { "hover": { "role": "link", "name": "Docs" } }
 //   { "press": "Enter" }   { "wait": 300 }
 // Matching is a substring, case-insensitive, unless the selector says "exact": true.
@@ -24,6 +25,13 @@ export async function runSteps(page, steps = [], timeout = 5000) {
   for (const s of steps) {
     if (s.click) await locate(page, s.click).click({ timeout });
     else if (s.fill) await locate(page, s.fill).fill(String(s.fill.value ?? ''), { timeout });
+    else if (s.select) {
+      const o = s.select.option ?? s.select.value;
+      const el = locate(page, s.select);
+      // Match the option's visible label first, then its value.
+      try { await el.selectOption({ label: String(o) }, { timeout }); }
+      catch { await el.selectOption(String(o), { timeout }); }
+    }
     else if (s.hover) await locate(page, s.hover).hover({ timeout });
     else if (s.press) await page.keyboard.press(s.press);
     else if (s.wait) await page.waitForTimeout(Math.min(Number(s.wait) || 0, 10000));
