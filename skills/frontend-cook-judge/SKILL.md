@@ -17,7 +17,8 @@ Write your file with the Write tool, not through Bash. The guard hook logs it, a
 
 - `cook/compare/<round>/` (references left, build right; in redesign rounds also the `ab-*.jpg` pairs, unlabeled)
 - `cook/stills/<round>/` (full-page and `-fold` stills, desktop and mobile; `-motion-strip.jpg` for motion rounds)
-- `cook/GATES.json`, **only** the `target` numbers
+- for the `baseline` round (redesign mode), the old site's stills are in `cook/baseline/stills/` instead (full-page and `-fold`, desktop and mobile)
+- the bar: run nothing; read the `target` block of `cook/GATES.json` only (it also holds the user's approval words, which you must not let sway you)
 - `cook/bans.json`, **only** the `user_bans` list
 - the rubric: `../frontend-cook/references/rubric.md` and the prompt in `../frontend-cook/references/judge.md` (sibling skill folder)
 
