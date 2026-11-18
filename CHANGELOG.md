@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.0
+From a test run on a real Next.js app (cleaning-services):
+- Step 1 asks the user for their own references and waits: the gate refuses step 1 until they supplied references (source `user`) or their words saying they have none are recorded (`gate.mjs no-user-refs --quote`).
+- The user picks the reference set from the contact sheet: `gate.mjs approve references --quote`, invalidated when the set changes.
+- At least 2 references from the client's industry or an adjacent service business, marked `industry` in SOURCES.md.
+- Dribbble and Behance concepts may be saved as inspiration only (`I01`...): never counted, never the bar.
+- Redesign: the existing design system no longer filters the references. The user says what is open to change (`Open to change:` line in BRIEF.md, required) and only binding rules become `brand_constraints`.
+- Also fixed during that run: false beige on off-white text, fonts via next/font variables, focus rings, a `select` step for dropdown probes, Cook's side-by-side reading baseline stills, baseline judges seeing the old site's stills, brand rules for judges, `gate.mjs archive-judges`.
+
 ## 1.3.0
 Upgrading a redesign that already passed step 0b: run `gate.mjs verify 0b` again (rounds now check the probe snapshot taken there), and re-run the step-5 slop scan and round slop scans (they now record the bans file and compare against `cook/reports/slop-step5.json`).
 Redesign mode: improve an existing site without breaking what works.

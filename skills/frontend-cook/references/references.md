@@ -12,7 +12,7 @@ Short prompt, strong references. One good screenshot tells the model the type, s
 
 ## Where they come from, in this order
 
-1. **The user's own.** Brand sites, competitors they admire, screenshots they attached. Ask once at intake.
+1. **The user's own.** Brand sites, competitors they admire, screenshots they attached. Ask at intake and **wait for the answer**: this question never gets a default. Mark them `user` in SOURCES.md. If they have none, record their words with `gate.mjs no-user-refs --quote "..."`; the gate refuses step 1 otherwise.
 2. **Inspo MCP** (832 real sites, captured on desktop and mobile, with traced palettes and type ramps):
    - `recommend` with the one-sentence brief: one call returns a macrostructure, 5 exemplars, reference components and a palette direction. Start here.
    - `search_screens` with `style`, `industry`, `macrostructure`, `mode` filters (call `get_filters` if unsure of the values).
@@ -30,6 +30,18 @@ Short prompt, strong references. One good screenshot tells the model the type, s
 4. **The open web**, only if the three above leave a gap. Mark it `web` in SOURCES.md.
 
 Use both MCPs for whatever the user did not supply. The gate checks the ledger for real Inspo and Awwwards tool calls, so a source word typed into SOURCES.md does not count. Each reference must be a different image: the gate rejects duplicates.
+
+## The client's industry
+
+At least 2 references must come from the client's own industry or an adjacent service business (a car-care brand, a home-services company, a subscription service people trust with their home or car). Mark them `industry` in SOURCES.md, e.g. `R02 | inspo | https://... | industry: home services | leads on: ...`. They show what customers in that market already expect; the other references raise the bar above it.
+
+## Inspiration only: Dribbble and Behance
+
+Concept shots (Dribbble, Behance, AI concepts) are often products that do not exist and carry the generic look this skill avoids, so they are never references. If the user likes one, or it shows an idea worth taking, save it as `I01`, `I02`... in `cook/refs/` with a line in SOURCES.md (`I01 | dribbble | <url> | idea: ...`). Inspiration images do not count toward the 9 to 12, are not used in side-by-sides, and never set the bar.
+
+## Redesign: do not let the old design system filter the references
+
+An existing DESIGN.md or brand book describes the site as it is, and a redesign is there to raise it. Before searching, ask the user which of its rules are binding (usually: logo, brand colours, token names, Arabic/RTL support, accessibility) and which are open to change (often: typeface, type scale, layout, photography, section patterns). Write their answer on an `Open to change:` line in BRIEF.md and record only the binding rules as `brand_constraints` in `cook/bans.json`, with their words. Search and pick references for the look, not for agreement with the old document; take open items from the references, not from DESIGN.md. (Inspo's own server notes say to follow a project's design system instead of searching: for a redesign whose goal is a better look, search anyway.)
 
 ## Capture them the same way the build will be captured
 
@@ -63,7 +75,7 @@ R03 | user | brand site, supplied by the user | leads on: color, logo
 
 `cook/BRIEF.md` from `templates/BRIEF.md`. 40 lines max. The user's words verbatim on the `User's words:` line.
 
-## Show the user before moving on
+## Show the user and wait for their picks
 
 Make a contact sheet and send it:
 
@@ -72,3 +84,5 @@ ffmpeg -y -i "cook/refs/R%02d-desktop-fold.png" -vf "scale=640:-1,tile=4x3" -fra
 ```
 
 (If file numbering has gaps, use cook's `side-by-side.mjs` with pairs instead.) Ask which ones to cut or replace. Their choice wins. Then `gate.mjs verify 1`.
+
+Send the sheet to the user (in a non-interactive run, stop and hand it to whoever is acting for the user) and wait. Their picks beat yours. Record the approval in their words: `gate.mjs approve references --quote "..."`. If the set changes afterwards, show it again and get a new approval; the gate checks that the approval is newer than every file in `cook/refs`.

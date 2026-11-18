@@ -19,7 +19,8 @@
 //   status                                every step, its state and the next step
 //   check <step>                          may this step start? (previous steps passed, inputs present)
 //   verify <step>                         is this step done? marks it passed only when every proof holds
-//   approve <mockup|static|final|baseline> --quote "<user's exact words>"
+//   approve <mockup|static|final|baseline|references> --quote "<user's exact words>"
+//   no-user-refs --quote "..."         the user was asked for references and has none (step 1)
 //   override <step> --quote "<user's exact words>" --reason "<why>"   user takes responsibility, logged
 //   reopen <step>                         set this step and every later one back to pending
 //   set-bar --judge 9.2 --floor 8.5 --similarity 99 [--mockup 8] [--quote "..."]
@@ -156,6 +157,7 @@ function hoursElapsed(g) { return g.time?.started ? (Date.now() - Date.parse(g.t
 function stillsFor(kind) {
   if (kind === 'mockup') return S('stills', 'mockup');
   if (kind === 'baseline') return S('baseline', 'stills');
+  if (kind === 'references') return S('refs');
   const r = latestRound();
   return r ? S('stills', r) : null;
 }
@@ -544,6 +546,22 @@ function doneChecks(g, step) {
         }
       }
       out.push([dupes.length === 0, dupes.length ? `${dupes.join('; ')} are the same image: each reference must be a different capture` : 'no two references are the same image']);
+      // The user is asked for their own references, and an answer is required: their references
+      // (source "user"), or their words saying they have none. Never a silent default.
+      out.push([(kinds.user || 0) > 0 || quoteOk(g.user_refs_none),
+        (kinds.user || 0) > 0 ? `${kinds.user} reference(s) supplied by the user`
+          : g.user_refs_none ? `user has no references of their own: "${g.user_refs_none}"`
+          : 'the user was not asked for their own references: ask, wait for the answer, then add them as source "user" (or record: gate.mjs no-user-refs --quote "<their words>")']);
+      // References from the client's own industry or adjacent service businesses, marked "industry" in SOURCES.md.
+      const industry = [...ids.keys()].filter((id) => src.split('\n').some((l) => new RegExp(`\\b${id}\\b`, 'i').test(l) && /\bindustry\b/i.test(l))).length;
+      out.push([industry >= 2, `${industry} reference(s) from the client's industry or an adjacent service business (need 2+; mark them "industry" in SOURCES.md)`]);
+      if (g.mode === 'redesign') {
+        out.push([briefLine('Open to change') !== null, briefLine('Open to change') !== null
+          ? `BRIEF.md Open to change: ${briefLine('Open to change')}`
+          : 'BRIEF.md has no "Open to change:" line: ask the user which rules of the existing design system may change (typeface, layout, photography...) and which are binding; record the binding ones as brand_constraints']);
+      }
+      // The user saw the contact sheet and picked the set.
+      out.push(C.approval(g, 'references'));
       const shots = (() => { try { return readFileSync(S('SHOTS.md'), 'utf8'); } catch { return ''; } })();
       const noShot = [...ids.keys()].filter((id) => !new RegExp(`\\b${id}\\b`, 'i').test(shots));
       out.push([shots.length > 0 && noShot.length === 0, noShot.length ? `SHOTS.md does not cover: ${noShot.join(', ')}` : 'SHOTS.md covers every reference with what to take from it']);
@@ -1143,13 +1161,13 @@ if (isMainRun) {
     }
     case 'approve': {
       const g = load();
-      if (!['mockup', 'static', 'final', 'baseline'].includes(a1)) fail('approve mockup|static|final|baseline --quote "<user words>"');
+      if (!['mockup', 'static', 'final', 'baseline', 'references'].includes(a1)) fail('approve mockup|static|final|baseline|references --quote "<user words>"');
       const q = opt('--quote');
       needUserWords(q);
       // The approval is tied to the stills the user saw: a newer still makes it stale.
       const dir = stillsFor(a1);
       const imgs = dir ? images(dir) : [];
-      const where = { mockup: 'cook/stills/mockup', baseline: 'cook/baseline/stills' }[a1] || 'cook/stills/<round>';
+      const where = { mockup: 'cook/stills/mockup', baseline: 'cook/baseline/stills', references: 'cook/refs (the contact sheet)' }[a1] || 'cook/stills/<round>';
       if (!imgs.length) fail(`no stills to approve yet for ${a1}: show the user the stills first (${where})`);
       g.approvals[a1] = { quote: q, at: new Date().toISOString(), shown: newestMtime(imgs) };
       save(g);
@@ -1315,6 +1333,13 @@ if (isMainRun) {
         g.motion = 'none'; g.motion_quote = q;
       } else g.motion = 'refs';
       save(g); console.log(`motion: ${g.motion}`);
+      break;
+    }
+    case 'no-user-refs': {
+      const g = load();
+      needUserWords(opt('--quote'));
+      g.user_refs_none = opt('--quote'); save(g);
+      console.log(`recorded: the user has no references of their own: "${g.user_refs_none}"`);
       break;
     }
     case 'no-feedback': {

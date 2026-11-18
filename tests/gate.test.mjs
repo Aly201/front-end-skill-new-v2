@@ -96,8 +96,11 @@ function refsProject(checks = {}) {
   write(join(d, 'cook', 'BRIEF.md'), "# Brief\nTarget: a landing page for a rope maker.\nUser's words: \"make it feel like a workshop\"\n");
   const hosts = 'abcdefghi'.split('').map((c) => `${c}.com`);
   hosts.forEach((h, i) => png(join(d, 'cook', 'refs', `R0${i + 1}.png`), 1440, 900));
-  write(join(d, 'cook', 'refs', 'SOURCES.md'), hosts.map((h, i) => `R0${i + 1} | ${i < 5 ? 'inspo' : 'awwwards'} | https://${h}/ | take: type`).join('\n'));
+  write(join(d, 'cook', 'refs', 'SOURCES.md'), hosts.map((h, i) => `R0${i + 1} | ${i < 5 ? 'inspo' : 'awwwards'} | https://${h}/ | take: type${i < 2 ? ' | industry: marine supply' : ''}`).join('\n'));
   write(join(d, 'cook', 'SHOTS.md'), hosts.map((h, i) => `| S0${i + 1} | R0${i + 1} | hero | desktop | spacing | - |`).join('\n'));
+  say('I have no references of my own, find them for me. These references look right, approved.', d);
+  assert.equal(runGate(d, ['no-user-refs', '--quote', 'I have no references of my own']).code, 0);
+  assert.equal(runGate(d, ['approve', 'references', '--quote', 'These references look right, approved']).code, 0);
   return d;
 }
 
@@ -112,7 +115,7 @@ test('gates refuse until proof exists, then pass in order', () => {
   write(cook('BRIEF.md'), "# Brief\nTarget: a landing page for a rope maker. Stack: plain HTML.\nUser's words: \"make it feel like a workshop\"\n");
   const hosts = ['a.com', 'b.com', 'c.com', 'd.com', 'e.com', 'f.com', 'g.com', 'h.com', 'i.com'];
   hosts.forEach((h, i) => png(cook('refs', `R0${i + 1}.png`), 1440, 900));
-  write(cook('refs', 'SOURCES.md'), hosts.map((h, i) => `R0${i + 1} | ${i < 5 ? 'inspo' : 'awwwards'} | https://${h}/ | take: type`).join('\n'));
+  write(cook('refs', 'SOURCES.md'), hosts.map((h, i) => `R0${i + 1} | ${i < 5 ? 'inspo' : 'awwwards'} | https://${h}/ | take: type${i < 2 ? ' | industry: marine supply' : ''}`).join('\n'));
   write(cook('SHOTS.md'), hosts.map((h, i) => `| S0${i + 1} | R0${i + 1} | hero | desktop | spacing | - |`).join('\n'));
   png(cook('refs', 'R09.png'), 400, 300);
   assert.match(gate('verify', '1').out, /R09: 400x300/, 'thumbnail-sized reference is refused');
@@ -121,12 +124,22 @@ test('gates refuse until proof exists, then pass in order', () => {
   assert.match(gate('verify', '1').out, /libraries were not used/, 'naming the libraries in SOURCES.md is not enough');
   mcpCall(proj, 'mcp__inspo__recommend');
   mcpCall(proj, 'mcp__awwwards__search_sites');
+  // The user must be asked for their own references and must pick the set.
+  assert.match(gate('verify', '1').out, /not asked for their own references/);
+  assert.match(gate('verify', '1').out, /not approved the references/);
+  say('I have no references of my own, find them for me.');
+  assert.equal(gate('no-user-refs', '--quote', 'I have no references of my own').code, 0);
+  say('These references look right, approved.');
+  assert.equal(gate('approve', 'references', '--quote', 'These references look right, approved').code, 0);
   assert.equal(gate('verify', '1').code, 0, gate('verify', '1').out);
   // Two references that are the same image are one reference.
   const r08 = readFileSync(cook('refs', 'R08.png'));
   write(cook('refs', 'R09.png'), r08);
   assert.match(gate('verify', '1').out, /R0[89] and R0[89] are the same image/);
   png(cook('refs', 'R09.png'), 1440, 900);
+  // The set changed after the approval: the user approves the new set.
+  assert.match(gate('verify', '1').out, /changed after the approval/);
+  assert.equal(gate('approve', 'references', '--quote', 'These references look right, approved').code, 0);
   assert.equal(gate('verify', '1').code, 0, gate('verify', '1').out);
 
   // Step 2: mockup. The builder writes it; two judges score it; the user approves it in their words.
@@ -1245,4 +1258,18 @@ test('found on a real repo: archive-judges retires a round so improved work can 
   assert.equal(left.filter((f) => f.endsWith('.json')).length, 0);
   const arch = left.find((f) => f.startsWith('archive-'));
   assert.ok(arch && readdirSync(join(p, 'cook', 'judge', 'mockup', arch)).length === 3);
+});
+
+test('step 1 needs 2+ references from the client industry, and a redesign records what may change', () => {
+  const d = refsProject();
+  mcpCall(d, 'mcp__inspo__recommend'); mcpCall(d, 'mcp__awwwards__search_sites');
+  assert.equal(runGate(d, ['verify', '1']).code, 0, runGate(d, ['verify', '1']).out);
+  const src = readFileSync(join(d, 'cook', 'refs', 'SOURCES.md'), 'utf8').replace(/ \| industry: marine supply/g, '');
+  write(join(d, 'cook', 'refs', 'SOURCES.md'), src);
+  assert.match(runGate(d, ['verify', '1']).out, /0 reference\(s\) from the client's industry/);
+  write(join(d, 'cook', 'refs', 'SOURCES.md'), src.replace('R01 | inspo', 'R01 | inspo | industry: car care').replace('R02 | inspo', 'R02 | inspo | industry: home services'));
+  assert.equal(runGate(d, ['verify', '1']).code, 0);
+  const g = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8')); g.mode = 'redesign';
+  write(join(d, 'cook', 'GATES.json'), JSON.stringify(g));
+  assert.match(runGate(d, ['verify', '1']).out, /no "Open to change:" line/);
 });

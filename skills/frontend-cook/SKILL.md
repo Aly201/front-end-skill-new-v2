@@ -46,10 +46,14 @@ Requires: step 0. Read `references/redesign.md`. `node <skill>/scripts/baseline.
 
 Requires: step 0. Read `references/references.md`.
 - Redesign: also put the old site beside a reference in `cook/compare/baseline/` and score it with 2+ judges in `cook/judge/baseline/`, then `gate.mjs approve baseline --quote`. Add a `Keep:` line to BRIEF.md.
+- **Ask the user for their own references first and wait for the answer.** This one question is never answered with a default. Their references go in as source `user`; if they have none, record their words: `gate.mjs no-user-refs --quote "..."`.
 - 9 to 12 references, each a real capture at 1200px+ wide. User's own first; fill the rest with Inspo (`recommend` with the brief, then `search_screens`, `find_similar`, `find_components`) and Awwwards (`search_sites`, `get_site_details`, `search_elements`). Both libraries, at least 3 different sites. The gate checks the ledger for real Inspo and Awwwards tool calls, and rejects duplicate reference images.
 - Capture every reference the same way the build will be captured: `node <skill>/scripts/shoot.mjs <url> --out cook/refs --name R01 --fold`.
 - Write `cook/refs/SOURCES.md`, `cook/SHOTS.md` (what to take from each one) and a short `cook/BRIEF.md` (40 lines max) from `templates/`.
-- Send the user a contact sheet of the references and ask which to cut. Their picks beat yours.
+- At least 2 references from the client's own industry or an adjacent service business, marked `industry` in SOURCES.md (Inspo `industry` filter, Awwwards tags). The rest can come from anywhere that sets a higher bar.
+- Inspiration-only images (Dribbble, Behance concepts) may be added as `I01`, `I02`... They never count toward the 9 to 12 and are never the bar.
+- **Show the user the contact sheet and wait for their picks.** Then `gate.mjs approve references --quote "<their words>"`. A changed set needs a new approval.
+- Redesign: the existing design system does not filter the references. Ask which of its rules may change (`Open to change:` line in BRIEF.md) and record only the binding ones as `brand_constraints` (`references/redesign.md`).
 - Redesign: put the old site beside a reference in `cook/compare/baseline/` and score the baseline with 2+ judges in `cook/judge/baseline/` (`references/redesign.md`). A user rating of the old site is recorded (`calibration.baseline_user`) but does not change calibration.
 Done: `gate.mjs verify 1`.
 

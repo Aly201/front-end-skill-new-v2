@@ -93,6 +93,9 @@ Once approved, `baseline.mjs` refuses to recapture (exit 2: "the baseline is alr
 
 ## Step 1 (redesign)
 
+Before searching: ask the user which rules of the existing design system may change and which are binding. Write an `Open to change:` line in BRIEF.md (e.g. `Open to change: typeface and type scale, hero layout, section patterns, photography (licensed stock allowed)`), and record only the binding rules as `brand_constraints` with their words. The gate refuses step 1 in redesign mode without that line. The old DESIGN.md does not filter the references; open items come from the references.
+
+
 Add a `Keep:` line to `cook/BRIEF.md` with the Keep list. Score the baseline (above).
 
 ## Step 2 (redesign): the mockup redesigns the real content
