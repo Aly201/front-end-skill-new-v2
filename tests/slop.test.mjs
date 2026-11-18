@@ -371,3 +371,16 @@ test('the report records bans_sha1: the sha1 of the bans file it used, null with
   spawnSync(process.execPath, [CLI, fx('clean'), '--bans', bans, '--out', out], { cwd: dir, encoding: 'utf8' });
   assert.equal(JSON.parse(readFileSync(out, 'utf8')).bans_sha1, sha(bans));
 });
+
+test('found on a real site: warm off-white text, lines and focus rings on a dark ground are not beige; a beige surface still is', () => {
+  const f = (text) => ids(one('a.css', text), 'beige').length;
+  assert.equal(f(':root{--fg:#ECE9E2;--line:rgba(236,233,226,0.12);--focus:0 0 0 4px #ECE9E2}'), 0, 'token names for text, lines, focus');
+  assert.equal(f('.t{color:#ECE9E2;border:1px solid #ECE9E2;box-shadow:0 0 0 2px #ECE9E2}'), 0, 'text, border, shadow');
+  assert.equal(f('body{background:#F5EFE3}'), 1, 'a beige page background is still caught');
+  assert.equal(f(':root{--ground:#F5EFE3}'), 1, 'a beige ground token is still caught');
+});
+
+test('found on a real site: fonts set through next/font variables or var(--font) count as a chosen typeface', () => {
+  const r = folder({ 'index.html': '<!doctype html><p>Hi</p>', 'tokens.css': ':root{--font: var(--font-latin), system-ui, sans-serif}', 'globals.css': 'body{font-family: var(--font)}' });
+  assert.equal(ids(r, 'default-typeface').filter((x) => x.severity === 'error').length, 0);
+});

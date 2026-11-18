@@ -157,14 +157,16 @@ const LINE_RULES = [
     test: (l) => (l.match(/<Sparkles\b|\bSparklesIcon\b|✨/) || [])[0] },
   { id: 'glass-card', sev: 'warn', files: [...MARKUP, ...SCRIPT], msg: 'Default glassmorphism card (backdrop blur on translucent white).',
     test: (l) => classHas(l, [/\bbackdrop-blur/, /\bbg-white\/(5|10|20)\b/]) },
-  { id: 'beige', sev: 'error', files: ALL, msg: 'Beige / cream color.',
+  { id: 'beige', sev: 'error', files: ALL, msg: 'Beige / cream background.',
     test: (l) => {
-      if (BEIGE_NAMES.test(l) && /(color|background|bg|fill|--)/i.test(l)) return l.match(BEIGE_NAMES)[0];
+      // The ban is on beige/cream SURFACES. A warm off-white used for text, lines or borders on a
+      // dark ground is not that look, so only background-like properties (or unknown context) count.
+      const ok = (hit) => (hit && !isNonSurfaceUse(l, hit) ? hit : null);
+      if (BEIGE_NAMES.test(l) && /(color|background|bg|fill|--)/i.test(l)) { const r = ok(l.match(BEIGE_NAMES)[0]); if (r) return r; }
       if (TW_BEIGE.test(l)) return l.match(TW_BEIGE)[0];
-      const c = colorsIn(l).find((x) => isBeige(x.hsl));
-      if (c) return c.text;
-      const o = oklchIn(l).find(isOklchBeige);
-      return o ? o.text : null;
+      for (const c of colorsIn(l).filter((x) => isBeige(x.hsl))) { const r = ok(c.text); if (r) return r; }
+      for (const o of oklchIn(l).filter(isOklchBeige)) { const r = ok(o.text); if (r) return r; }
+      return null;
     } },
   { id: 'purple-gradient', sev: 'error', files: ALL, msg: PURPLE_MSG,
     test: (l) => {
@@ -260,6 +262,17 @@ function lineMap(text) {
   };
 }
 
+// The property a color value belongs to, from the text before it on the line ("--fg: #ECE9E2" -> "--fg",
+// "color: rgba(...)" -> "color"). Text, line, border and shadow uses of a warm off-white are not a beige surface.
+const NON_SURFACE_PROP = /^(color|caret-color|--(fg|text|ink|on|line|border|rule|stroke|outline|shadow|ring|focus|muted)[\w-]*|--[\w-]*-(fg|text|ink|line|border|stroke)(-[\w-]*)?|border[\w-]*|outline[\w-]*|stroke|text-decoration[\w-]*|box-shadow|text-shadow|column-rule[\w-]*|-webkit-text-fill-color)$/i;
+function isNonSurfaceUse(line, hit) {
+  const i = line.indexOf(hit);
+  if (i < 0) return false;
+  const m = /([-\w]+)\s*:[^:;{}]*$/.exec(line.slice(0, i));
+  if (m) return NON_SURFACE_PROP.test(m[1]);
+  return /\b(text|border|ring|stroke|outline|decoration|divide)-\[/.test(line.slice(Math.max(0, i - 20), i)); // Tailwind text-[#..]
+}
+
 function fontFamilies(text) {
   const fams = new Set();
   for (const m of text.matchAll(/font-family\s*:\s*([^;}{]+)/gi)) {
@@ -329,11 +342,15 @@ export function scan(targets, bansPath, opts = {}) {
 
   let anyMotion = false, anyReduced = false, markupScanned = false;
   const fams = new Set();
+  // Fonts set through a CSS variable (next/font `variable:`, a design-token --font) or @font-face count as set:
+  // the family name is not visible here, but a typeface was chosen.
+  let fontsByVariable = false;
   for (const { f, ext, text } of docs) {
     if (isMotion(text)) anyMotion = true;
     if (REDUCED.test(text)) anyReduced = true;
     if (TYPE_MARKUP.includes(ext)) markupScanned = true;
     for (const x of fontFamilies(text)) fams.add(x);
+    if (/font-family\s*:\s*var\(|next\/font|@font-face|--font[\w-]*\s*:/i.test(text)) fontsByVariable = true;
 
     // Line rules. A rule that misses the raw line gets a second try on the line with vars expanded.
     const lines = text.split('\n');
@@ -381,7 +398,7 @@ export function scan(targets, bansPath, opts = {}) {
     findings.push({ id: 'reduced-motion', severity: 'error', file: '(project)', line: 0, text: '', message: 'Animations exist but nothing honors prefers-reduced-motion.' });
   }
   const named = [...fams].filter((f) => !GENERIC_FONTS.has(f));
-  if (files.length && !fams.size && markupScanned && !allowed.has('default-typeface')) {
+  if (files.length && !fams.size && markupScanned && !fontsByVariable && !allowed.has('default-typeface')) {
     findings.push({ id: 'default-typeface', severity: 'error', file: '(project)', line: 0, text: 'no typeface set', message: 'No font family is set. Pick type from the references.' });
   } else if (files.length && fams.size && !named.length && !allowed.has('default-typeface')) {
     findings.push({ id: 'default-typeface', severity: 'warn', file: '(project)', line: 0, text: [...fams].join(', '), message: 'Only default typefaces (Inter / Roboto / system). Pick type from the references.' });
