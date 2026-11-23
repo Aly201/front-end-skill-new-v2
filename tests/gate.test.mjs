@@ -359,7 +359,7 @@ test('approval needs the user words typed in this project and stills to show', (
   const d = newProject();
   write(join(d, 'cook', 'mockup', 'index.html'), page('<h1>x</h1>'));
   assert.equal(runGate(d, ['approve', 'mockup', '--quote', 'yes this mockup feels right']).code, 2);
-  assert.match(runGate(d, ['approve', 'mockup', '--quote', 'yes this mockup feels right']).out, /not logging prompts/);
+  assert.match(runGate(d, ['approve', 'mockup', '--quote', 'yes this mockup feels right']).out, /no words from the user are logged yet/);
   say('something else entirely', d);
   assert.match(runGate(d, ['approve', 'mockup', '--quote', 'yes this mockup feels right']).out, /not in any message the user typed/);
   say('yes this mockup feels right', d);
@@ -414,12 +414,12 @@ test('the separate judge must be a session that never built, and must meet the b
   writeJudge(d2, 'r01', 'judge-b.json', judgeDoc('B', 9.4, 'm2'), 'judge-session', null);
   logLine(d2, { at: new Date().toISOString(), session_id: 'judge-session', tool: 'Write', file: 'cook/BRIEF.md', agent: null });
   assert.equal(runGate(d2, ['score', 'r01']).code, 0);
-  assert.match(runGate(d2, ['verify', '8']).out, /no judge file in r01 was written from a separate session/);
+  assert.match(runGate(d2, ['verify', '8']).out, /no separate judge for r01/);
 
   // No ledger at all: the hook is not installed.
   const d3 = newProject();
   write(join(d3, 'cook', 'judge', 'r01', 'judge-a.json'), JSON.stringify(judgeDoc('A', 9.6, 'm1')));
-  assert.match(runGate(d3, ['verify', '8']).out, /no ledger: the guard hook is not installed/);
+  assert.match(runGate(d3, ['verify', '8']).out, /no ledger and no script judge/);
 });
 
 test('set-time: a floor under 2h or a cap needs the user words, and verify 4 checks them', () => {

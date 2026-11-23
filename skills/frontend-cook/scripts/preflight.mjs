@@ -11,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { findSkill, loadPlaywright, launchBrowser, homeDir, STATE_DIR } from './_common.mjs';
+import { findSkill, loadPlaywright, loadPackage, launchBrowser, homeDir, STATE_DIR } from './_common.mjs';
 
 const args = new Set(process.argv.slice(2));
 const INSTALL = args.has('--install');
@@ -254,6 +254,23 @@ if (INSTALL && !args.has('--skip-browser') && !loadPlaywright(cwd)) {
 
 // Browser for stills, audits and motion recordings (re-checked after any install above)
 C.browser = await checkBrowser();
+
+// Script judge (judge.mjs, any platform): the Claude API SDK, and credentials. Reported, never a failure:
+// in Claude Code a separate session can judge instead.
+if (INSTALL && !loadPackage('@anthropic-ai/sdk', cwd)) {
+  const dir = join(homeDir(), '.frontend-cook');
+  mkdirSync(dir, { recursive: true });
+  const sdk = run('npm', ['i', '--prefix', dir, '@anthropic-ai/sdk'], 300000);
+  result.installed.push({ what: 'Claude API SDK (for judge.mjs)', ok: sdk.ok, command: `npm i --prefix ${dir} @anthropic-ai/sdk`, out: sdk.out.slice(-400) });
+}
+{
+  const hasSdk = Boolean(loadPackage('@anthropic-ai/sdk', cwd));
+  const hasCreds = Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN);
+  result.judge = { sdk: hasSdk, credentials: hasCreds };
+  if (!hasSdk || !hasCreds) {
+    result.warnings.push(`script judge (judge.mjs) not ready: ${!hasSdk ? 'the @anthropic-ai/sdk package is missing (preflight --install adds it)' : ''}${!hasSdk && !hasCreds ? '; ' : ''}${!hasCreds ? 'no ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN in this environment (an `ant auth login` profile may still work; the user sets keys in their own environment, never in chat or a tracked file)' : ''}. Outside Claude Code this is the only separate judge`);
+  }
+}
 
 result.ok = Object.values(C).every((c) => c.ok);
 result.next = result.ok

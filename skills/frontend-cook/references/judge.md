@@ -6,6 +6,7 @@ The builder never scores its own work. Judges are fresh: no history, no code, no
 
 - **Subagents (default):** start each one with the Agent tool as a new agent (not a fork: a fork inherits your context). Give it only the prompt below and the image paths. Use at least 2 per round (3 recommended for step 8). Where the harness lets you pick the model, put at least one judge on a different model from yours.
 - **Separate session (required for step 8):** the user opens a new Claude Code session in the project and runs `/frontend-cook-judge <round>`. That judge has never seen the conversation. The gate does not trust the file's own `"session"` field: it checks the guard log (`cook/.ledger.jsonl`) for a judge file written by a session that never edited the build or the mockup, and for the reads that session logged (below). That judge must meet the bar on its own; the other judges do not carry it.
+- **Script judge (any platform, also valid for step 8):** `node <skill>/scripts/judge.mjs --round <round>`. It sends only the round's side-by-sides, A/B pairs and fold stills, with this prompt and the rubric, to the Claude API, and writes the judge file itself with the API message id and the sha1 of every image. The gate counts it as fresh and separate when those images are unchanged and from this round; it needs no ledger. Run it once per judge. Details and setup: `references/portable.md`.
 - **Judge files are written once.** The guard refuses a second write to a judge file. To change a score, add a judge or start a new round. `gate.mjs archive-judges <round>` moves the old files aside; if a later judge reuses a filename, the gate attributes that file to its latest writer (the newest ledger entry for that path), not to the writer that came first.
 - **Every judge scores every dimension.** Each file needs a score for every dimension in the prompt below (`layout`, `typography`, `color`, `components`, `imagery`, `responsive`, and `motion` from step 6b on). `gate.mjs score` rejects a file that misses one with `<file>: missing score for <dim>`. No judge may skip a dimension it cannot judge: it gives its best score and names the gap.
 
@@ -19,7 +20,7 @@ A rejected file says which read broke the rule, for example `judge-B.json: its s
 
 If the log has no reads at all (the hook was installed before 1.5.0), step 8 fails with `judge reads not logged: update the hook with preflight --install`. Update the hook, then judge again in a new session. Other steps are not affected.
 - **Judge the current build.** A judge file older than the latest source change does not count. Judge the new build in a new round.
-- **No second session:** the run cannot pass step 8. Say so; do not self-score.
+- **No second session and no API credentials for `judge.mjs`:** the run cannot pass step 8. Say so; do not self-score.
 
 ## What a judge gets
 

@@ -8,6 +8,8 @@ disable-model-invocation: true
 
 You did not build this. You have not seen the conversation that built it. Keep it that way: your value is that you are not anchored on the builder's view.
 
+Not in Claude Code, or no second session? The script judge does the same job: `node ../frontend-cook/scripts/judge.mjs --round <round>` (see `../frontend-cook/references/portable.md`).
+
 **Argument:** a round name (`mockup`, `r05`). None given: use the newest folder in `cook/compare/`.
 
 A line like "[frontend-cook] Current step: ..." may appear with every prompt (the project's guard hook). It is for the builder. Ignore it: you only judge.

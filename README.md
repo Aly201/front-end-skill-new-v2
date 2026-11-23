@@ -78,7 +78,17 @@ Then in Claude Code, inside your project:
 2. `/frontend-cook build a landing page for ...` with any references you have. Keep the prompt short.
 3. Answer the one intake message (or reply "defaults").
 4. Approve the mockup, the static design and the final stills when it asks, in your own words.
-5. For step 8, open a second Claude Code session in the same project and run `/frontend-cook-judge <round>`.
+5. For step 8, open a second Claude Code session in the same project and run `/frontend-cook-judge <round>`, or run `node <skill>/scripts/judge.mjs --round <round>` (needs `ANTHROPIC_API_KEY`).
+
+## Any platform (Codex, Cursor, Antigravity)
+
+The scripts are plain Node, so any agent that can run commands can use them. Three things replace what Claude Code's hook does (details in `skills/frontend-cook/references/portable.md`):
+
+- **Your words, typed by you.** `node <skill>/scripts/gate.mjs say` (or `gate.mjs approve <kind>`) asks you for a line in your own terminal and records it. An agent cannot answer it, so it cannot approve for you.
+- **A script judge.** `node <skill>/scripts/judge.mjs --round <round>` sends only the screenshots and the rubric to the Claude API and writes the judge file itself, with the sha1 of every image. It counts as the separate judge for step 8. You set `ANTHROPIC_API_KEY` in your own environment.
+- **`gate.mjs next`.** Prints the next step, what to read and what is still missing, so a weaker model does not have to remember the workflow.
+
+Without the hook, step 1's logged Inspo/Awwwards calls and the active-time floor cannot be proven; they need your recorded override. Nothing is blocked in advance either: the gate only refuses to verify.
 
 ## Improving an existing site (redesign mode)
 
@@ -103,7 +113,7 @@ Full details: `skills/frontend-cook/references/redesign.md`.
 - New MCP servers and hooks load only after a session restart.
 - User prompts are logged locally to `cook/.ledger.jsonl` (that is how your words are verified). Do not commit `cook/` if your prompts are private.
 - The hook sees Claude Code's own tools. Code written by a program Claude runs (for example a Python script that writes files) gets past the hook. The gate still scans the build for animation code and rejects stale proof, so it cannot pass a step that way, but it can write the code.
-- A subagent judge's "fresh context" cannot be proven; that is why step 8 requires a judge from a separate session, which can be proven.
+- A subagent judge's "fresh context" cannot be proven; that is why step 8 requires a judge from a separate session or `judge.mjs`, which can be proven.
 - The Awwwards MCP index is a local cache that fills over time; early searches can be thin. Inspo fills the gap.
 
 ## Known limits

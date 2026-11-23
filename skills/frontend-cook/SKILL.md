@@ -14,6 +14,8 @@ An opt-in design workflow for flagship landing pages, multi-page sites and major
 
 - **Before every step:** read that step's section in `references/workflow.md`, then `node <skill>/scripts/gate.mjs check <step>`. Exit 0 or do not start; tell the user the FAIL lines in plain words.
 - **After every step:** `node <skill>/scripts/gate.mjs verify <step>`. Exit 0 or the step is not done. Never write "done" before this passes.
+- **Lost?** `node <skill>/scripts/gate.mjs next` prints the next step, what to read and what is still missing. Run it after every action.
+- **The user's words** come from their own messages (Claude Code logs them) or from `gate.mjs say` / `gate.mjs approve <kind>`, which the user runs in their own terminal. You never type them. Outside Claude Code, read `references/portable.md`.
 - After a context compaction: `gate.mjs status`, then `cook/BRIEF.md`, `cook/SHOTS.md` and the last two entries of `cook/ROUNDS.md`. Do not restart work that passed.
 - **The guard hook** (installed by setup) blocks design code before the mockup and the design rules pass, added motion before the static design passes, hand edits to script-written files, and agent-browser. It logs every tool call, every read and every user prompt to `cook/.ledger.jsonl`, which is how the gate checks the user's words, judge independence and active time. A block means a step is not done: do not work around it.
 
@@ -44,7 +46,7 @@ Read the step's section in `references/workflow.md` before each one.
 | 6a Static | The real build without motion, in rounds; `JOURNEYS.json`; the user approves (`references/usability.md`). | rounds pass at the bar, approved |
 | 6b Motion | Motion taken from references with any tool, with reduced-motion paths (`references/motion.md`). | motion rounds pass |
 | 7 Feedback | Every remark pinned to a section, closed with proof (`references/feedback.md`). | no open feedback |
-| 8 Judge | Fresh judges plus a separate-session judge (`references/judge.md`), the release checklist, the user's final approval, `gate.mjs report`. | final bar met, checklist ticked, approved |
+| 8 Judge | Fresh judges plus a separate judge: a second session (`/frontend-cook-judge`) or `judge.mjs` (`references/judge.md`), the release checklist, the user's final approval, `gate.mjs report`. | final bar met, checklist ticked, approved |
 
 **The round** (6a, 6b, after feedback): fix the weakest thing in depth, take stills, side-by-sides, `slop_scan.mjs`, `audit.mjs` on every page, `journeys.mjs` (and `regress.mjs` in redesign mode), 2+ fresh judges, update SECTIONS.md and ROUNDS.md, send the stills. Full commands: `references/workflow.md`, "The round".
 
@@ -68,6 +70,7 @@ Read the step's section in `references/workflow.md` before each one.
 | `references/references.md` | Step 1. |
 | `references/rubric.md` | Steps 2, 3 and every scoring. |
 | `references/judge.md` | Every time judges run: what each judge may read, the prompt, the read checks. |
+| `references/portable.md` | Outside Claude Code (Codex, Cursor, Antigravity), or whenever the user's words or a separate judge are needed without the hook. |
 | `references/usability.md` | Step 6a and every round: audit checks (keyboard, focus, labels, reduced motion, SEO, performance), `JOURNEYS.json`, RTL projects. |
 | `references/slop.md` | Step 5, and before any visible change. |
 | `references/motion.md` | Step 6b. |
@@ -75,6 +78,7 @@ Read the step's section in `references/workflow.md` before each one.
 | `templates/` | BRIEF, SOURCES, SHOTS, SECTIONS, MOTION, RELEASE, CREDITS, judge JSON, KEEP.md and probes (redesign). |
 | `scripts/gate.mjs` | Before and after every step; `report` for the final report. |
 | `scripts/preflight.mjs` | Step 0. |
+| `scripts/judge.mjs` | Any round: a script judge that sends only the images and the rubric to the Claude API. |
 | `scripts/shoot.mjs` | Every capture: references, mockup, rounds. |
 | `scripts/slop_scan.mjs` | Step 5 and every round. |
 | `scripts/baseline.mjs` | Step 0b (redesign); `--probes-only` after writing the probes. |

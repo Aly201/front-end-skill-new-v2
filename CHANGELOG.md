@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.6.0
+Works on any coding platform (Codex, Cursor, Antigravity, ...), and holds a weaker or forgetful agent to the steps:
+- `gate.mjs say` and `gate.mjs approve <kind>` (without `--quote`): the user types their words in their own interactive terminal; they are recorded in the ledger as `UserTTY` and count wherever the user's words are needed. Both refuse to run without a terminal, so an agent cannot answer them.
+- `scripts/judge.mjs`: a script judge. It sends only the round's side-by-sides, A/B pairs and fold stills, with the rubric, to the Claude API (structured JSON output, refusal fallback), and writes the judge file itself with the model, the API message id and each image's sha1. `gate.mjs score` and step 8 accept it as fresh and separate without a ledger, and reject it when an image changed, a hash is forged, an image is from outside the round, or the file was written with an agent's Write tool.
+- `gate.mjs next`: the next step, the section of `workflow.md` to read, and up to 10 missing items in order, flagging those that need the user.
+- `preflight.mjs --install` adds `@anthropic-ai/sdk` to `~/.frontend-cook` and warns (without failing) when no API credentials are set.
+- The guard allows `node .../judge.mjs`.
+- New `references/portable.md`: the three commands, what still needs Claude Code's hook, and a short brief for another agent.
+
 ## 1.5.1
 From a second external review (Gemini and Codex), each claim reproduced before fixing:
 - Opt-in: all three skills are manual-only (`disable-model-invocation: true`); run `/frontend-cook` for flagship landing pages and major redesigns, not routine UI work.

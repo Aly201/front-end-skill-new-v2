@@ -120,6 +120,18 @@ function walkForSkill(dir, name, depth) {
 
 // Load Playwright from wherever it is installed: the project, the global npm root,
 // or a preinstalled tools folder. Returns the module or null.
+// Load an npm package from wherever it is installed: the project, ~/.frontend-cook (where preflight
+// --install puts the skill's own dependencies), a preinstalled tools folder, or the global npm root.
+export function loadPackage(name, cwd = process.cwd()) {
+  const roots = [cwd, join(homedir(), '.frontend-cook'), process.env.PLAYWRIGHT_ROOT, '/opt/node-tools'];
+  const g = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', shell: process.platform === 'win32' });
+  if (g.status === 0) roots.push(dirname(g.stdout.trim()));
+  for (const r of roots.filter(Boolean)) {
+    try { return createRequire(join(r, 'noop.js'))(name); } catch { /* next */ }
+  }
+  return null;
+}
+
 export function loadPlaywright(cwd = process.cwd()) {
   const roots = [cwd, process.env.PLAYWRIGHT_ROOT, '/opt/node-tools', join(homedir(), '.frontend-cook')];
   const g = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', shell: process.platform === 'win32' });
@@ -184,7 +196,9 @@ export function userSaid(root, quote) {
   if (!q) return false;
   // Whole words only: "it" must not match inside "edit".
   const re = new RegExp(`(^|[^\\p{L}\\p{N}])${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|[^\\p{L}\\p{N}])`, 'u');
-  return readLedger(root).some((e) => e.tool === 'UserPrompt' && re.test(normWords(e.prompt || '')));
+  // UserPrompt: logged by the Claude Code hook. UserTTY: typed by the user into `gate.mjs say` or
+  // `gate.mjs approve` in their own interactive terminal (works on any platform).
+  return readLedger(root).some((e) => (e.tool === 'UserPrompt' || e.tool === 'UserTTY') && re.test(normWords(e.prompt || '')));
 }
 
 // Hours of real activity: gaps between tool calls of up to `gapMin` minutes count, longer gaps

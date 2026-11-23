@@ -23,6 +23,8 @@
 //   check <step>                          may this step start? (previous steps passed, inputs present)
 //   verify <step>                         is this step done? marks it passed only when every proof holds
 //   approve <mockup|static|final|baseline|references> --quote "<user's exact words>"
+//   say                                 (run by the USER in their own terminal) type words the gate accepts as theirs
+//   next                                what to do next, in order (for any agent, any platform)
 //   no-user-refs --quote "..."         the user was asked for references and has none (step 1)
 //   override <step> --quote "<user's exact words>" --reason "<why>"   user takes responsibility, logged
 //   reopen <step>                         set this step and every later one back to pending
@@ -43,7 +45,7 @@
 //
 // Steps: 0 setup, 1 references, 2 mockup, 3 bar, 4 time, 5 bans, 6a static build,
 //        6b motion, 7 feedback, 8 separate judge.
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, renameSync, appendFileSync } from 'node:fs';
 import { join, resolve, extname, basename, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -152,8 +154,26 @@ function h2Set(md) {
 // logs the user's prompts to the ledger; the words must appear there.
 function needUserWords(q) {
   if (!quoteOk(q)) fail('this needs the user\'s exact words in --quote (8+ characters). Never write them yourself.');
-  if (!readLedger(root).some((e) => e.tool === 'UserPrompt')) fail('guard hook is not logging prompts: run /frontend-cook-setup and restart');
-  if (!userSaid(root, q)) fail('these words are not in any message the user typed in this project. Paste their exact words; never write them yourself.');
+  if (!readLedger(root).some((e) => e.tool === 'UserPrompt' || e.tool === 'UserTTY')) {
+    fail('no words from the user are logged yet. In Claude Code the guard hook logs their messages (run /frontend-cook-setup and restart if it does not). On any other platform, ask the user to type their answer themselves, in their own terminal: node <skill>/scripts/gate.mjs say');
+  }
+  if (!userSaid(root, q)) fail('these words are not in any message the user typed in this project (Claude Code prompt or gate.mjs say). Ask the user to type them; never write them yourself.');
+}
+
+// ---------------- the user's own words, typed in their own terminal (any platform) ----------------
+async function askUserTTY(prompt) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    fail('this must be run by the user in their own interactive terminal (an agent cannot answer it). Ask the user to run it, or pass their exact words with --quote after they typed them with gate.mjs say.');
+  }
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const words = (await rl.question(prompt)).trim();
+  rl.close();
+  if (!quoteOk(words)) fail('too short: type at least 8 characters');
+  return words;
+}
+function logUserTTY(words) {
+  appendFileSync(S('.ledger.jsonl'), JSON.stringify({ at: new Date().toISOString(), session_id: null, tool: 'UserTTY', file: null, prompt: words }) + '\n');
 }
 
 // ---------------- proof helpers ----------------
@@ -364,12 +384,54 @@ function judgeReadProblems(ledger, round, file, g) {
   return probs;
 }
 
+// A script judge (judge.mjs): it sent only the round's images and the rubric to the model API and wrote the file itself.
+// It counts as fresh and separate on any platform, with or without a ledger, when its record holds: the API message id,
+// and every image it saw is this round's side-by-side, A/B pair or still, still on disk with the same sha1. A file that
+// claims to be a script judge but was written with an agent's Write or Edit tool is not one.
+export function scriptJudgeProblems(round, file, ledger = readLedger(root)) {
+  const j = readJson(S('judge', round, file));
+  if (!j || j.judged_by !== 'judge.mjs') return null; // not a script judge
+  const probs = [];
+  if (j.session !== 'script') probs.push('session is not "script"');
+  if (typeof j.message_id !== 'string' || !j.message_id) probs.push('no API message id');
+  const imgs = Array.isArray(j.images) ? j.images : [];
+  if (!imgs.length) probs.push('no images recorded');
+  const compareDir = `cook/compare/${round}/`;
+  const stillsDir = round === 'baseline' ? 'cook/baseline/stills/' : `cook/stills/${round}/`;
+  for (const im of imgs) {
+    const pth = String(im?.path || '');
+    if (!pth.startsWith(compareDir) && !pth.startsWith(stillsDir)) { probs.push(`${pth || 'an image'} is not this round's side-by-side or still`); continue; }
+    const now = sha1File(resolve(root, pth));
+    if (!now) probs.push(`${pth} is gone`);
+    else if (now !== im.sha1) probs.push(`${pth} changed after it was judged (judge the round again)`);
+  }
+  if (imgs.length && (!imgs.some((im) => String(im.path).startsWith(compareDir)) || !imgs.some((im) => String(im.path).startsWith(stillsDir)))) {
+    probs.push(`it did not see a side-by-side in ${compareDir} and a still in ${stillsDir}`);
+  }
+  const w = judgeWriter(ledger, round, file);
+  if (w && w.tool !== 'Bash') probs.push(`written with the ${w.tool} tool, not by judge.mjs`);
+  return probs;
+}
+const isScriptJudge = (round, file, ledger) => { const p = scriptJudgeProblems(round, file, ledger); return Array.isArray(p) && p.length === 0; };
+
 // Every judge file must come through the guard hook, the builder never judges itself, and (when reads are logged)
 // the judge read only what a fresh judge may read.
 function judgeProvenance(round, g) {
   const ledger = readLedger(root);
-  if (!ledger.length) return [[false, 'no ledger: the guard hook is not installed (run /frontend-cook-setup)']];
-  const files = judgeFilesIn(round);
+  const all = judgeFilesIn(round);
+  const out = [];
+  // Script judges first: they are checked by their record, not by the ledger.
+  const scripted = all.filter((f) => scriptJudgeProblems(round, f, ledger) !== null);
+  for (const f of scripted) {
+    const p = scriptJudgeProblems(round, f, ledger);
+    out.push(p.length ? [false, `${f} (judge.mjs): ${p.join('; ')}`] : [true, `${f}: judged by judge.mjs (${readJson(S('judge', round, f))?.model || 'model'}), images unchanged since`]);
+  }
+  const files = all.filter((f) => !scripted.includes(f));
+  if (!files.length) {
+    if (!all.length) out.push([false, `no judge files in ${round}`]);
+    return out;
+  }
+  if (!ledger.length) return [...out, [false, `no ledger for ${files.join(', ')}: a session judge needs the guard hook (run /frontend-cook-setup). On other platforms use judge.mjs`]];
   const builders = builderSessions(ledger);
   const hasAgents = ledger.some((e) => e.agent != null);
   const unlogged = [], selfWritten = [];
@@ -378,10 +440,10 @@ function judgeProvenance(round, g) {
     if (!w) { unlogged.push(f); continue; }
     if (hasAgents && w.agent == null && builders.has(w.session_id)) selfWritten.push(f);
   }
-  const out = [
+  out.push(
     [files.length > 0 && unlogged.length === 0, unlogged.length ? `no ledger Write entry for ${unlogged.join(', ')}: a judge writes its own judge file through the guard hook` : (files.length ? 'every judge file was written through the guard hook' : `no judge files in ${round}`)],
     [selfWritten.length === 0, selfWritten.length ? `${selfWritten.join(', ')} written by the builder itself, not by a judge` : 'no judge file was written by the builder itself'],
-  ];
+  );
   if (!readsLogged(ledger)) {
     out.push([true, 'judge reads not logged: update the hook with preflight --install (not checked here)']);
   } else {
@@ -818,25 +880,33 @@ function doneChecks(g, step) {
       if (g.mode === 'redesign') out.push(...abChecks(g, r));
       // Separate judge, proven by the guard hook's ledger: a judge file in this round written
       // by a session that never edited the build, the mockup or the project.
+      // Or a script judge (judge.mjs), which works on any platform: only the images and the rubric went to the model.
       const ledger = readLedger(root);
       const builders = builderSessions(ledger);
+      const scriptOk = judgeFilesIn(r).filter((f) => isScriptJudge(r, f, ledger));
       const separate = judgeFilesIn(r).filter((f) => {
+        if (scriptJudgeProblems(r, f, ledger) !== null) return false;
         const w = judgeWriter(ledger, r, f);
         return Boolean(w && w.session_id && !builders.has(w.session_id));
       });
-      out.push([ledger.length > 0, ledger.length ? 'guard hook ledger present' : 'no ledger: the guard hook is not installed (run /frontend-cook-setup)']);
-      out.push([separate.length > 0, separate.length ? `separate-session judge verified: ${separate.join(', ')}` : `no judge file in ${r} was written from a separate session (one that never edited the build). Open a new Claude Code session here and run /frontend-cook-judge ${r}`]);
-      // Judge reads: the separate judge read the round's side-by-side and a still, and nothing a fresh judge must not see.
       const logged = readsLogged(ledger);
-      if (!logged) {
-        out.push([false, 'judge reads not logged: update the hook with preflight --install']);
+      const sessOk = logged ? separate.filter((f) => judgeReadProblems(ledger, r, f, g).length === 0) : [];
+      if (scriptOk.length) {
+        out.push([true, `script judge(s) verified: ${scriptOk.join(', ')} (judge.mjs: only the images and the rubric were sent)`]);
       } else {
-        const bad = separate.map((f) => [f, judgeReadProblems(ledger, r, f, g)]).filter(([, p]) => p.length);
-        out.push(!separate.length ? [false, 'no separate judge session to check the reads of']
-          : bad.length ? [false, bad.map(([f, p]) => `${f}: ${p.join('; ')}`).join(' / ')]
-            : [true, `separate judge(s) ${separate.join(', ')}: read the round's side-by-side and a still, and nothing a fresh judge must not see`]);
+        out.push([ledger.length > 0, ledger.length ? 'guard hook ledger present' : `no ledger and no script judge: run node <skill>/scripts/judge.mjs --round ${r} (any platform), or install the guard hook (Claude Code)`]);
+        out.push([separate.length > 0, separate.length ? `separate-session judge verified: ${separate.join(', ')}` : `no separate judge for ${r}. Run node <skill>/scripts/judge.mjs --round ${r} (needs Claude API credentials), or in Claude Code open a new session here and run /frontend-cook-judge ${r}`]);
+        // Judge reads: the separate judge read the round's side-by-side and a still, and nothing a fresh judge must not see.
+        if (!logged) {
+          out.push([false, 'judge reads not logged: update the hook with preflight --install, or use judge.mjs']);
+        } else {
+          const bad = separate.map((f) => [f, judgeReadProblems(ledger, r, f, g)]).filter(([, p]) => p.length);
+          out.push(!separate.length ? [false, 'no separate judge session to check the reads of']
+            : bad.length ? [false, bad.map(([f, p]) => `${f}: ${p.join('; ')}`).join(' / ')]
+              : [true, `separate judge(s) ${separate.join(', ')}: read the round's side-by-side and a still, and nothing a fresh judge must not see`]);
+        }
       }
-      const sepOk = logged ? separate.filter((f) => judgeReadProblems(ledger, r, f, g).length === 0) : [];
+      const sepOk = [...scriptOk, ...sessOk];
       const sepMed = median(sepOk.map((f) => readJson(S('judge', r, f))?.overall));
       const sepCal = sepMed === null ? null : Math.round((sepMed + g.calibration.offset) * 100) / 100;
       out.push([sepCal !== null && sepCal >= g.target.judge, sepCal === null ? 'no separate judge score to check' : `the separate judge scored ${sepCal} calibrated: it must meet the bar on its own (bar ${g.target.judge})`]);
@@ -1399,8 +1469,13 @@ if (isMainRun) {
     }
     case 'approve': {
       const g = load();
-      if (!['mockup', 'static', 'final', 'baseline', 'references'].includes(a1)) fail('approve mockup|static|final|baseline|references --quote "<user words>"');
-      const q = opt('--quote');
+      if (!['mockup', 'static', 'final', 'baseline', 'references'].includes(a1)) fail('approve mockup|static|final|baseline|references --quote "<user words>" (or, run by the user in their own terminal, without --quote)');
+      let q = opt('--quote');
+      if (q === null) {
+        // Run by the user themselves: they type the approval here. Agents have no interactive terminal.
+        q = await askUserTTY(`Approve the ${a1}? Type your approval in your own words (8+ characters): `);
+        logUserTTY(q);
+      }
       needUserWords(q);
       // The approval is tied to the stills the user saw: a newer still makes it stale.
       const dir = stillsFor(a1);
@@ -1596,6 +1671,34 @@ if (isMainRun) {
       save(g); console.log(`motion: ${g.motion}`);
       break;
     }
+    case 'say': {
+      // The user types words the gate will accept as theirs (approvals, overrides, caps, "no motion"...).
+      // Interactive terminal only: an agent running commands cannot answer this prompt.
+      load();
+      const words = await askUserTTY('Type your words exactly as you want them recorded (one line): ');
+      logUserTTY(words);
+      console.log(`recorded your words: "${words}"\nThe agent can now use them with --quote "${words}".`);
+      break;
+    }
+    case 'next': {
+      const g = load();
+      const n = nextStep(g);
+      if (!n) { console.log('All steps passed. Finish with: gate.mjs report'); break; }
+      const checks = [...startChecks(g, n), ...doneChecks(g, n)];
+      const open = checks.filter(([ok]) => !ok).map(([, m]) => m);
+      console.log(`NEXT: step ${n} (${STEP_NAMES[n]}).`);
+      console.log(`READ FIRST: <skill>/references/workflow.md, the section for step ${n}.`);
+      if (!open.length) console.log(`Every requirement holds: run gate.mjs verify ${n}`);
+      else {
+        console.log(`STILL MISSING (${open.length}), in order:`);
+        open.slice(0, 10).forEach((m, i) => console.log(`  ${i + 1}. ${m}`));
+        if (open.length > 10) console.log(`  ... and ${open.length - 10} more (gate.mjs verify ${n} lists all)`);
+        const userNeeded = open.filter((m) => /user|approve|--quote|their words|gate\.mjs say/i.test(m));
+        if (userNeeded.length) console.log('NEEDS THE USER: ask them, wait for their answer, and use only their exact words (they can type them with gate.mjs say in their own terminal).');
+      }
+      console.log('Do the first missing item, then run gate.mjs next again. Do not guess past a FAIL.');
+      break;
+    }
     case 'no-user-refs': {
       const g = load();
       needUserWords(opt('--quote'));
@@ -1633,8 +1736,13 @@ if (isMainRun) {
       // Judge reads (when logged): a judge whose session read what a fresh judge must not read is rejected here too.
       const ledger = readLedger(root);
       const rejected = {};
+      for (const f of judgeFilesIn(a1)) {
+        const sp = scriptJudgeProblems(a1, f, ledger);
+        if (sp && sp.length) rejected[f] = `judge.mjs record: ${sp.join('; ')}`;
+      }
       if (readsLogged(ledger)) {
         for (const f of judgeFilesIn(a1)) {
+          if (scriptJudgeProblems(a1, f, ledger) !== null) continue;
           const probs = judgeWriter(ledger, a1, f) ? judgeReadProblems(ledger, a1, f, g) : [];
           if (probs.length) rejected[f] = probs.join('; ');
         }

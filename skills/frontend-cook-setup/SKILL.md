@@ -20,6 +20,7 @@ frontend-cook does not run without its dependencies. This skill installs what is
    - **Guard hook** in the project's `.claude/settings.json` (PreToolUse on Write/Edit/MultiEdit/NotebookEdit/Bash, on Read/Glob/Grep, and on MCP tools, and UserPromptSubmit): enforces mockup-first and static-first, protects the files only scripts write, and logs activity for the separate-judge, judge-read and active-time checks. Read, Glob and Grep are logged and never blocked. Tell the user it was added; they can see it in `/hooks`. If `.claude/settings.json` is not valid JSON, the hook is not written; the check fails and the user must fix the file.
    - **An old hook** (one that does not match Read, Glob and Grep) is detected as outdated. Running `preflight.mjs --install --write` again upgrades it in place. Hooks load at session start, so restart Claude Code after an upgrade.
    - **Browser** (Playwright + Chromium into `~/.frontend-cook`), only when no Playwright is found.
+   - **Claude API SDK** (`@anthropic-ai/sdk` into `~/.frontend-cook`) for the script judge `judge.mjs`. A missing `ANTHROPIC_API_KEY` is a warning, not a failure: tell the user to set it in their own environment if they want script judges (never in chat).
    Without the `claude` CLI it writes both MCP servers into the project's `.mcp.json` instead.
 2. Only Node and ffmpeg are not installed for you. If either check fails, give the user the one command for their system and stop:
    - Node 18+: https://nodejs.org
