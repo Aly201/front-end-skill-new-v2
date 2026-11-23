@@ -296,6 +296,9 @@ try {
     const dir = await page.evaluate(() => document.documentElement.dir);
     const perf = await page.evaluate(perfCheck);
     const focus = await walkFocus(page);
+    // Text still hidden on the normal load (animations forced to their end state) is hidden by design
+    // (a dock shown on scroll, a closed menu), not by an animation that never ran.
+    const hiddenByDesign = new Set((await page.evaluate(motionCheck)).hidden);
     // Second load with reduced motion requested: no style override and no scroll, steps applied, then 1 s of settling.
     const rm = await browser.newContext({ viewport: { width, height }, ...rest, reducedMotion: 'reduce' });
     const rp = await rm.newPage();
@@ -306,7 +309,7 @@ try {
     const motion = await rp.evaluate(motionCheck);
     await rm.close();
     per[vn] = { overflow_px: r.overflow, contrast_checked: r.contrastChecked, contrast_not_measured: r.contrastUnmeasured, font_families: r.families, font_sizes: r.sizes,
-      interaction: { focus_checked: focus.checked, focus_missing: focus.missing, unreachable: focus.unreachable, unlabeled_fields: unlabeled, reduced_motion_hidden: motion.hidden, infinite_animations: motion.infinite, seo, perf } };
+      interaction: { focus_checked: focus.checked, focus_missing: focus.missing, unreachable: focus.unreachable, unlabeled_fields: unlabeled, reduced_motion_hidden: motion.hidden.filter((x) => !hiddenByDesign.has(x)), infinite_animations: motion.infinite, seo, perf } };
     if (r.overflow > 1) add('error', 'overflow', vn, `Page is ${r.overflow}px wider than the viewport (horizontal scroll).`);
     for (const e of errs) add('error', 'console', vn, e);
     for (const b of r.imagesBroken) add('error', 'images', vn, `Broken image: ${b}`);

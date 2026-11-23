@@ -158,3 +158,12 @@ test('--rtl fails without the --steps that switch the direction', SKIP, () => {
   assert.equal(r.status, 1, r.raw);
   assert.equal(findingsOf(r.report, 'rtl', 'error').length, 1, r.raw);
 });
+
+test('found on a real site: text hidden by design (a dock shown on scroll) is not a reduced-motion failure', SKIP, () => {
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>T</title><meta name="description" content="d">
+<style>body{font-family:Georgia,serif;font-size:18px;color:#111;background:#fff} .dock{position:fixed;bottom:0;opacity:0} .dock.on{opacity:1}</style></head>
+<body><main><h1>Plans</h1><p>Weekly car care.</p></main><div class="dock"><span>Choose a Plan</span></div>
+<script>addEventListener('scroll',()=>{ if (scrollY>800) document.querySelector('.dock').classList.add('on'); });</script></body></html>`;
+  const r = audit(html);
+  assert.equal(findingsOf(r.report, 'reduced-motion', 'error').length, 0);
+});
