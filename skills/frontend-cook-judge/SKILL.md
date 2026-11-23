@@ -13,6 +13,8 @@ A line like "[frontend-cook] Current step: ..." may appear with every prompt (th
 
 Write your file with the Write tool, not through Bash. The guard hook logs it, and that log is what proves to the gate that a separate session judged.
 
+The guard hook also logs every file you read, with Read, Glob and Grep. The gate checks that log: your session must have read at least one side-by-side and one still for this round, and nothing from the list under "You must not read". A read that breaks the rule makes your file unusable, and the gate says which read it was.
+
 ## You may read only
 
 - `cook/compare/<round>/` (references left, build right; in redesign rounds also the `ab-*.jpg` pairs, unlabeled)
@@ -29,9 +31,9 @@ Source code, `cook/BRIEF.md`, `cook/ROUNDS.md`, `cook/SECTIONS.md`, `cook/MOTION
 ## Steps
 
 1. Look at every image at full size. Mobile too.
-2. Score with the prompt and anchors in `judge.md` / `rubric.md`. Be specific: section, viewport, the exact property to change. At least 3 gaps.
+2. Score with the prompt and anchors in `judge.md` / `rubric.md`. Score every dimension in the prompt (`layout`, `typography`, `color`, `components`, `imagery`, `responsive`, and `motion` when the prompt lists it); a file missing one is rejected. Be specific: section, viewport, the exact property to change. At least 3 gaps.
 2a. If the round has `ab-*.jpg` pairs (redesign), look at each pair at full size and add an `"ab"` list to your JSON: one entry per pair, `{"pair": "ab-1", "better": "left" or "right", "why": "one line"}`. Judge the page, not the position. Do not try to work out which side is newer; you cannot from the image, and you must not look for the key.
-3. Pick the next free letter: if `cook/judge/<round>/judge-A.json` exists, use B, and so on (checking that a file exists is fine; do not open it).
+3. Pick a letter that is not taken yet: A, then B, and so on. Do not list or open `cook/judge/`. If the Write is refused because the file already exists, the letter is taken: use the next one.
 4. Write the JSON to `cook/judge/<round>/judge-<letter>.json` with `"session": "separate"` and `"fresh": true`. Set `"different_model": true` if you know you run on a different model from the builder.
 5. Tell the user your overall score and your top 3 gaps in plain words. Do not soften them. Then tell them to return to the build session and run `gate.mjs score <round>`.
 
@@ -42,3 +44,4 @@ Source code, `cook/BRIEF.md`, `cook/ROUNDS.md`, `cook/SECTIONS.md`, `cook/MOTION
 - Edit any file other than your own judge file.
 - Fix the design yourself. You judge; the builder fixes.
 - Open `.abkey.json` or any other file that says which side of an `ab` pair is new.
+- Read the build source, `cook/BRIEF.md`, `cook/ROUNDS.md`, `cook/SECTIONS.md`, a `summary.json` or another judge's file, even to check something. The read is logged, and the gate rejects the file.

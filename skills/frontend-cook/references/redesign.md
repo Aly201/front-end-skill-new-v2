@@ -11,9 +11,11 @@ The bar does not change: 9.2 overall, 8.5 per dimension, 99 similarity as the st
 ## Start
 
 ```bash
-node <skill>/scripts/gate.mjs init --project X --mode redesign --src src --exclude 'src/legacy/**' --url http://localhost:5173 --pages /,/pricing
+node <skill>/scripts/gate.mjs init --project X --mode redesign --src src --exclude 'src/legacy/**' --url http://localhost:5173 --pages /,/pricing --type site --languages en
 node <skill>/scripts/gate.mjs set-checks --cmd "npm test" --cmd "npm run build"
 ```
+
+`--type` (landing, site, app or component) and `--languages` work as in step 0 of SKILL.md; `set-type` and `set-languages` change them later. The type sets the reference, industry and motion counts and the time floor (SKILL.md, Intake table). The example uses `site`, which fits a multi-page site; choose the type that matches the project.
 
 - `--src` is the folder with the design code. Repeat it for more folders. `--exclude` takes globs for code you will not restyle (legacy, vendored). Excluded files are still scanned, but only for new slop.
 - `--url` is the running dev server or the production URL of the current site. A dev server that moves to another port between rounds needs no change: links are compared by path, not by origin.
@@ -150,12 +152,20 @@ node <skill>/scripts/regress.mjs --out cook/reports/regress-rNN.json
 - Items recorded as `unstable` at baseline are not compared. A new page error (an uncaught exception) is an error; a new console error is a warning. A lost nav link that is still on the page somewhere else warns ("moved out of the nav").
 - `regress.mjs` also runs every probe and reruns the `set-checks` commands (an error only where the baseline passed). Its report must be ok and current.
 - `regress.mjs` is **desktop-only**. The inventory diff and the probes run at desktop width. Mobile is not covered by regress: check it with the mobile stills and `audit.mjs`.
-- Slop scan and audit run as in the normal round, on each page:
+- Slop scan, audit and journeys run as in the normal round (step 5 of the round), on each page:
 
 ```bash
 node <skill>/scripts/slop_scan.mjs src --baseline cook/reports/slop-step5.json --exclude 'src/legacy/**' --out cook/reports/slop-rNN.json
-node <skill>/scripts/audit.mjs http://localhost:5173 --out cook/reports/audit-rNN.json
+for page in / /pricing; do
+  slug=$(printf '%s' "$page" | sed 's#^/*##; s#/#-#g'); slug=${slug:-home}
+  node <skill>/scripts/audit.mjs "http://localhost:5173$page" --out "cook/reports/audit-rNN-$slug.json"
+done
+node <skill>/scripts/journeys.mjs --round rNN --out cook/reports/journeys-rNN.json
 ```
+
+- Audit runs on every page in `--pages` (the same list as the baseline), one report per page, named `audit-rNN-<slug>.json`: `/` is `home`, `/pricing` is `pricing`. Replace `/,/pricing` in the loop with your page list. The legacy `audit-rNN.json` is accepted only when the only page is `/`. Every report needs `checks_version: 2` (rerun any older one).
+- `journeys.mjs` runs `cook/JOURNEYS.json` on desktop and mobile, with the loading, empty, error and success states. It is required in every round, and it checks the main tasks that the probes do not cover. See `references/usability.md`.
+- The checks and their fixes are in `references/usability.md`.
 
 ## Step 8 (redesign): old against new
 
@@ -167,7 +177,9 @@ It makes `cook/compare/rNN/ab-<n>.jpg`: one pair per page and viewport that has 
 
 `verify 8` also requires the `ab` key to cover every baseline page in `gates.pages`, at desktop and mobile. The key and the `ab` files must be newer than the round's newest fold still and its newest source file. `compareCheck` ignores the `ab-<n>.jpg` files, so they do not replace the reference side-by-side.
 
-Judges add an `ab` list to their JSON, one entry per pair: `"ab": [{ "pair": "ab-1", "better": "left", "why": "..." }]`. They never learn which side is new.
+Judges add an `ab` list to their JSON, one entry per pair: `"ab": [{ "pair": "ab-1", "better": "left", "why": "..." }]`. They never learn which side is new. Every judge still scores every dimension (`references/judge.md`).
+
+The release checklist of step 8 applies here too: `cook/RELEASE.md` and `cook/CREDITS.md` (from `templates/`).
 
 `verify 8` requires every judge in the final round to have an entry for every pair, and every choice to be the new side. One wrong choice fails the round. Fix the design, not the judges. Also required: the bar met, no dimension below its baseline, and `regress` ok.
 

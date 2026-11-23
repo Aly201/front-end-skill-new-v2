@@ -2,7 +2,7 @@
 
 ## Dimensions
 
-Every judge scores every dimension from 0 to 10, plus one overall score that is a holistic verdict, not an average. Using separate numbers stops the weakest dimension from hiding behind the others.
+Every judge scores every dimension from 0 to 10, plus one overall score that is a holistic verdict, not an average. The six visual dimensions are scored in every round; `motion` is added from step 6b on. A judge file missing any dimension that applies is rejected by `gate.mjs score`. Using separate numbers stops the weakest dimension from hiding behind the others.
 
 | Dimension | Checks | Typical failure |
 |---|---|---|
@@ -33,9 +33,10 @@ The default bar is **9.2 overall, 8.5 every dimension**, by calibrated median. 8
 
 Before any judging, the build must pass:
 - `slop_scan.mjs`: the greppable bans (`slop.md`).
-- `audit.mjs`: horizontal overflow, console and network errors, broken images, WCAG AA contrast on solid backgrounds, tap targets on mobile, body size on mobile, empty links.
+- `audit.mjs`, on every page: horizontal overflow, console and network errors, broken images, WCAG AA contrast on solid backgrounds, tap targets on mobile, body size on mobile, empty links, and (checks version 2) keyboard reachability, visible focus, form labels, reduced-motion rendering, and basic SEO and performance warnings (`references/usability.md`).
+- `journeys.mjs`: the main user tasks in `cook/JOURNEYS.json`, on desktop and mobile.
 
-A build that fails either is not sent to judges. In ROUNDS.md, label every number as measured (a command produced it) or eyeballed (a judge gave it).
+A build that fails any of them is not sent to judges. In ROUNDS.md, label every number as measured (a command produced it) or eyeballed (a judge gave it).
 
 ## Calibration
 

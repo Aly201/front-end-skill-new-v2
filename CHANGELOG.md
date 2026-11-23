@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.5.0
+Thanks to an external review by Gemini and Codex. The maintainer verified each finding before it was fixed here.
+
+Upgrading a run in progress: run `/frontend-cook-setup` (or `preflight.mjs --install --write`) to upgrade the guard hook, which now logs reads, and restart Claude Code. Rerun every audit (reports must be version 2, `checks_version: 2`), name them per page as below, and add `cook/JOURNEYS.json` before the next round.
+
+Fixes:
+- Step 0: `gate.mjs init` now comes before the "prove the tools answer" calls, so the hook logs them. The docs said those calls were logged before init, which was wrong.
+- Audit naming: every page gets its own report in both modes, `audit-rNN-<slug>.json` (`/` is `home`, `/pricing` is `pricing`). A new multi-page build was audited on its home page only before. The legacy `audit-rNN.json` is accepted only when the only page is `/`.
+- Judge attribution: after `archive-judges`, a reused judge filename was attributed to its first writer. It now goes to the latest writer.
+- Judges: `score` accepted judge files that left out dimensions. Every judge now scores every applicable dimension, and a file missing one is rejected.
+
+New:
+- Project types: `landing`, `site`, `app` and `component`, set with `init --type` or `set-type`. Each has its own reference count (9 to 12, 9 to 12, 5 to 8, 3 to 6), industry minimum (2, 2, 1, 0), motion effects (5, 5, 2, 0) and time floor or cap (3h, 6h, 2h, cap 1h). The component cap needs no user words.
+- Languages: `init --languages en,ar` or `set-languages`. An RTL language requires an RTL journey that passes on both viewports, and `audit.mjs --rtl --steps` checks the switched page.
+- Usability checks in `audit.mjs` (checks version 2): keyboard reachability, visible focus, form labels, reduced-motion rendering, and basic SEO and performance warnings (transfer above 3000 KB, LCP above 4000 ms).
+- `cook/JOURNEYS.json` and `journeys.mjs`: the main tasks per page on desktop and mobile, with loading, empty, error and success states and mocks. Required from step 6a in both modes.
+- Reads are logged: the guard matches Read, Glob and Grep (never blocked). The gate checks that each judge read the round's side-by-sides and stills, and never the source, `BRIEF.md`, `ROUNDS.md`, `SECTIONS.md`, the summary or another judge's file. A hook from before 1.5.0 fails step 8 with "judge reads not logged" until `preflight --install` updates it.
+- Step 8 release checklist: `cook/RELEASE.md` (Content, Credits, Performance, SEO) and `cook/CREDITS.md` for every outside photo, font, icon and reference.
+- `skills/frontend-cook/references/usability.md`: why visual judging is not enough, the checks and how to fix them, journeys, RTL and reduced motion.
+
 ## 1.4.0
 From a test run on a real Next.js app (cleaning-services):
 - Step 1 asks the user for their own references and waits: the gate refuses step 1 until they supplied references (source `user`) or their words saying they have none are recorded (`gate.mjs no-user-refs --quote`).

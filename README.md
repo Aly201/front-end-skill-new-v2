@@ -9,21 +9,21 @@ It is built on top of [cook](https://github.com/Leonxlnx/cook) (the build, compa
 | # | Step | The gate refuses to pass it until |
 |---|---|---|
 | 0 | Setup | cook is installed, the Inspo and Awwwards MCPs are configured, Node 18+, ffmpeg and a headless browser work. Cannot be overridden. |
-| 1 | Strong references | You were asked for your own references and answered (yours, or your words saying you have none); 9 to 12 real captures 1200px+ wide from 3+ sites, 2+ from your industry, both Inspo and Awwwards called for the rest; you picked the set from the contact sheet. Dribbble/Behance concepts only as uncounted inspiration. Redesign: you said what in the old design system may change. |
+| 1 | Strong references | You were asked for your own references and answered (yours, or your words saying you have none); the count for your project type (9 to 12 for a landing page or site, 5 to 8 for an app, 3 to 6 for a component) of real captures 1200px+ wide from 3+ sites, with the industry minimum for the type (2, 2, 1 or none), both Inspo and Awwwards called for the rest; you picked the set from the contact sheet. Dribbble/Behance concepts only as uncounted inspiration. Redesign: you said what in the old design system may change. |
 | 2 | Target mockup | Steps 2 to 5 must pass before any build code is allowed. A single-file, animation-free mockup exists, its desktop and mobile stills are newer than its code, it is shown side by side with the references, it passes the slop scan, 2+ fresh judges scored its feel, and **you** approved it in your own words. The approval expires if the stills change. |
 | 3 | Bar as a number | Overall 9.2/10 and every dimension 8.5+ (by default). Lowering the overall bar, the per-dimension floor or the mockup bar needs your own words. |
-| 4 | Time | A floor (landing page 3h by default) or a cap is set. The floor counts **active** time from the hook's log (idle gaps over 15 minutes do not count) and needs 3+ judged rounds with 2+ judges each. A cap, or a floor under 2h, needs your words. Finishing early fails step 8. |
+| 4 | Time | A floor or a cap is set, from the project type: landing page 3h floor, site 6h, app 2h, component 1h cap. The floor counts **active** time from the hook's log (idle gaps over 15 minutes do not count) and needs 3+ judged rounds with 2+ judges each. A cap, or a floor under 2h, needs your words, except the component cap. Finishing early fails step 8. |
 | 5 | Ban the slop | The ban file exists; a ban is switched off only with your own words. |
-| 6a | Static build | No motion code in the build: scroll reveals, transitions of 500ms or more and marquees are blocked too. Latest stills, slop scan, browser audit and judge scores are all newer than the latest code change, the calibrated score meets the bar, and you approved the static design. |
-| 6b | Motion | Starts with `set-motion --refs`. You give references (sites or videos) and it extracts the motion with any tool or skill (recordings, ffmpeg frames, Awwwards motion analysis, ...), saving the output. 5+ effects from 2+ references, each with a measured duration and easing and non-empty saved evidence; the build must contain animation code; recorded and judged. Or you said "no motion" in your own words. |
+| 6a | Static build | No motion code in the build: scroll reveals, transitions of 500ms or more and marquees are blocked too. `cook/JOURNEYS.json` exists (the main tasks on desktop and mobile, with their states); every page has an audit report with the usability checks (keyboard, focus, labels, reduced motion, SEO and performance warnings) and no error; journeys pass on both viewports; with an RTL language, an RTL journey passes. Latest stills, slop scan, audits and judge scores are all newer than the latest code change, the calibrated score meets the bar, and you approved the static design. |
+| 6b | Motion | Starts with `set-motion --refs`. You give references (sites or videos) and it extracts the motion with any tool or skill (recordings, ffmpeg frames, Awwwards motion analysis, ...), saving the output. The effects the type needs (5 for a landing page or site, 2 for an app, none for a component), from 2+ references, each with a measured duration and easing and non-empty saved evidence and a reduced-motion path; the build must contain animation code; recorded and judged. Or you said "no motion" in your own words. |
 | 7 | Specific feedback | Every feedback item names a section (S1, S2...) from the section-by-section description, none is open, every closed one points to a screenshot that exists. No feedback at all needs your words. |
-| 8 | Separate judge | 2+ fresh judges agree: with 2, their scores are within 1.0; with 3 or more, the lowest is within 1.0 of the median. Judge files are written once and must be newer than the latest code change. The hook's log proves a judge file was written by a separate session that never touched the build, and that judge must meet the bar on its own. The time floor is reached and you approved the final stills. |
+| 8 | Separate judge | 2+ fresh judges agree: with 2, their scores are within 1.0; with 3 or more, the lowest is within 1.0 of the median. Every judge scores every dimension. Judge files are written once and must be newer than the latest code change. The hook's log proves a judge file was written by a separate session that never touched the build, that it did not read the source, the brief or another judge's file, and that judge must meet the bar on its own. The time floor is reached, `cook/RELEASE.md` is ticked (Content, Credits, Performance, SEO), `cook/CREDITS.md` lists every outside asset, and you approved the final stills. |
 
 For an existing site, redesign mode adds step 0b (a baseline of the current site, after setup) and the checks in the section below to steps 1, 2, 3, 5, 6a, every round and 8. The bar does not change.
 
 ## How it is enforced
 
-Two layers. `gate.mjs` checks every step before it starts and before it counts as done. A **guard hook** (added to your project's `.claude/settings.json` by setup) makes Claude Code itself refuse: design code until steps 2 to 5 pass, newly added motion code (scroll reveals, long transitions, marquees included) before the static design is approved, `agent-browser`, a second write to a judge file, and hand edits to the files only the scripts write. It also logs every action and every prompt you type, which is how your words, the separate judge and the active time are proven. Both behaviours were tested in a live Claude Code session.
+Two layers. `gate.mjs` checks every step before it starts and before it counts as done. A **guard hook** (added to your project's `.claude/settings.json` by setup) makes Claude Code itself refuse: design code until steps 2 to 5 pass, newly added motion code (scroll reveals, long transitions, marquees included) before the static design is approved, `agent-browser`, a second write to a judge file, and hand edits to the files only the scripts write. It also logs every action, including reads, and every prompt you type. That is how your words, the separate judge, what each judge read and the active time are proven. Both behaviours were tested in a live Claude Code session.
 
 ## Why it does not agree with you
 
@@ -36,9 +36,23 @@ Two layers. `gate.mjs` checks every step before it starts and before it counts a
 ## What the scripts measure
 
 - `slop_scan.mjs`: beige, purple gradients, em dashes, "Unlock the power"-style copy, lorem ipsum, Acme/John Doe, eyebrow labels, monospace uppercase, 01/02/03 counters, glowing orbs, ping rings, particles, gradient text, animation without `prefers-reduced-motion`; warnings for emoji icons, sparkles, glass cards, default-only typefaces, font sprawl.
-- `audit.mjs` (in a real browser): horizontal overflow, console and network errors, broken images, WCAG AA contrast on solid backgrounds, tap targets and body text size on mobile, unnamed links and buttons.
+- `audit.mjs` (in a real browser, every page): horizontal overflow, console and network errors, broken images, WCAG AA contrast on solid backgrounds, tap targets and body text size on mobile, unnamed links and buttons, and the usability checks below.
+- `journeys.mjs`: the main user tasks you list in `cook/JOURNEYS.json`, on desktop and mobile, with their loading, empty, error and success states.
 - `shoot.mjs`: the same capture settings for references, mockup and every round (desktop 1440, mobile 390), animations settled to their end state, plus scroll recordings and filmstrips for motion.
 - `gate.mjs`: the step gates, judge score aggregation (median, spread, calibration) and approvals.
+
+## Usability checks
+
+Judges score how a page looks; these checks measure whether it works. They are in `audit.mjs` and `journeys.mjs`, and they run before any judge sees the build:
+
+- **Keyboard and focus:** a visible control that Tab never reaches, and a focused control with no visible focus indicator.
+- **Forms:** every input, select and textarea has an accessible name.
+- **Reduced motion:** content stays visible, and no decorative loop runs, when the visitor asks for less motion.
+- **SEO and performance (warnings):** title, description, `lang`, one h1; page transfer and LCP.
+- **Journeys:** the main tasks on desktop and mobile, with loading, empty, error and success states.
+- **Arabic and right-to-left:** with `ar` in the languages, an RTL journey must pass on both viewports.
+
+Each check and how to fix it: `skills/frontend-cook/references/usability.md`.
 
 ## Requirements
 
@@ -96,6 +110,8 @@ Deliberate shell evasion is not stopped by the hook. A command written to get ar
 - The guard does not follow `cd` or symlinks when it decides which folder a command touches.
 - Moving `cook/` with `mv` is allowed; it is the documented restart.
 - Probe selectors match loosely unless `"exact": true` is set.
+- Interaction checks are heuristics: keyboard reachability looks at the first 60 Tab stops and compares focus styles; it does not prove every focus path works.
+- Journeys cover the tasks you list in `cook/JOURNEYS.json`, not every path through the site.
 - `regress.mjs` is desktop-only: the inventory diff and the probes run at desktop width. Mobile is checked by the stills and `audit.mjs`, not by regress.
 - Slop and motion allowances match the text of a line, so editing that line needs a new check.
 - An allowance covers every copy of a line; it cannot be limited to a count.
