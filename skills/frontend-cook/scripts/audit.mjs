@@ -3,6 +3,9 @@
 // never from a guess. Errors fail the audit.
 //
 // Usage: node audit.mjs <url | file.html | folder> [--out cook/reports/audit-r03.json] [--viewports desktop,mobile] [--json]
+//                        [--steps '<json>'] [--rtl]
+//   --steps  interaction steps (see _steps.mjs) run after load and before measuring, also in the reduced-motion load
+//   --rtl    also error when <html dir> is not "rtl" after the steps
 //
 // Checks per viewport:
 //   overflow     no horizontal scroll (error)
@@ -13,10 +16,21 @@
 //   tap-targets  links and buttons at least 24x24 CSS px on mobile (error), 44x44 advised (warn)
 //   type         at most 3 font families (warn), at most 10 distinct font sizes (warn), body text >= 14px on mobile (error)
 //   empty-links  links and buttons with no accessible name (error)
+//   keyboard     Tab reaches every visible interactive element within the first 60 Tab stops (error);
+//                every focused element shows a visible focus indicator (error)
+//   labels       inputs, selects and textareas have an accessible name (error)
+//   reduced-motion  under prefers-reduced-motion: reduce, text in the first two screens is not left hidden
+//                after load + 1 s (error); infinite animations still running (warn)
+//   seo          title, meta description, html lang, exactly one h1 (warn)
+//   perf         transfer over 3000 KB (warn); Largest Contentful Paint over 4000 ms (warn, null when unsupported)
+//   rtl          with --rtl: <html dir> is "rtl" after the steps (error)
+//
+// The report has checks_version 2. Each viewport's `interaction` holds the raw data behind the new checks.
 import { existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadPlaywright, launchBrowser } from './_common.mjs';
+import { runSteps } from './_steps.mjs';
 
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
@@ -25,14 +39,165 @@ const VIEWPORTS = {
 };
 const argv = process.argv.slice(2);
 const opt = (k, d = null) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
-const VALUED = new Set(['--out', '--viewports']);
+const VALUED = new Set(['--out', '--viewports', '--steps']);
 const target = argv.find((a, i) => !a.startsWith('--') && !VALUED.has(argv[i - 1]));
-if (!target) { console.error('usage: node audit.mjs <url | file.html | folder> [--out report.json] [--viewports desktop,mobile] [--json]'); process.exit(2); }
+if (!target) { console.error('usage: node audit.mjs <url | file.html | folder> [--out report.json] [--viewports desktop,mobile] [--json] [--steps \'<json>\'] [--rtl]'); process.exit(2); }
 const url = /^(https?|file):/i.test(target) ? target : (() => {
   const p = resolve(target);
   if (!existsSync(p)) { console.error(`audit: not found: ${target}`); process.exit(2); }
   return pathToFileURL(statSync(p).isDirectory() ? join(p, 'index.html') : p).href;
 })();
+
+let steps = null;
+if (argv.includes('--steps')) {
+  try { steps = JSON.parse(opt('--steps')); } catch { /* reported below */ }
+  if (!Array.isArray(steps)) { console.error('audit: --steps needs a JSON array of steps, e.g. \'[{"click":{"role":"button","name":"Menu"}}]\''); process.exit(2); }
+}
+const RTL = argv.includes('--rtl');
+
+// Runs the --steps on a loaded page. A failing step ends the audit with exit 2.
+async function applySteps(page, vn) {
+  if (!steps) return;
+  try { await runSteps(page, steps); } catch (e) {
+    throw Object.assign(new Error(`--steps failed at ${vn}: ${String(e.message).split('\n')[0]}`), { exit: 2 });
+  }
+}
+
+// Tabs through up to 60 stops. The walk is complete when focus leaves the document or a stop repeats.
+// A candidate Tab passed over (before the furthest stop reached) counts as unreachable; after a complete walk,
+// every unreached candidate does.
+async function walkFocus(page) {
+  const setup = await page.evaluate(focusSetup);
+  // Chrome's Tab order starts after the last clicked element (a --steps click, say), so start from a focused
+  // sentinel at the top of the body: the first Tab then lands on the first tabbable element of the document.
+  await page.evaluate(() => {
+    const s = document.createElement('span');
+    s.setAttribute('tabindex', '-1');
+    s.style.cssText = 'position:absolute;width:0;height:0;overflow:hidden';
+    document.body.insertBefore(s, document.body.firstChild);
+    s.focus();
+  });
+  const reached = new Set();
+  const missing = new Set();
+  const stops = new Set();
+  let maxIdx = -1;
+  let cycled = false;
+  for (let i = 0; i < 60; i++) {
+    await page.keyboard.press('Tab');
+    const st = await page.evaluate(focusStep);
+    if (st.left) { cycled = true; break; }
+    const key = st.idx >= 0 ? `i${st.idx}` : `s${st.sel}`;
+    if (stops.has(key)) { cycled = true; break; }
+    stops.add(key);
+    if (st.idx >= 0) { reached.add(st.idx); maxIdx = Math.max(maxIdx, st.idx); }
+    if (st.changed === false) missing.add(setup.sels[st.idx]);
+  }
+  const unreachable = setup.cands.filter((i) => !reached.has(i) && (cycled || i < maxIdx)).map((i) => setup.sels[i]);
+  return { checked: stops.size, missing: [...missing], unreachable };
+}
+
+// Runs inside the page: every focusable element (with its style snapshot, taken before any focus) and the
+// subset Tab can reach (visible, not disabled, not tabindex -1).
+function focusSetup() {
+  const sel = (el) => { const parts = []; let e = el; for (let i = 0; e && i < 4 && e !== document.body; i++, e = e.parentElement) { let s = e.tagName.toLowerCase(); if (e.id) { s += `#${e.id}`; parts.unshift(s); break; } const c = [...e.classList].slice(0, 2).join('.'); if (c) s += `.${c}`; parts.unshift(s); } return parts.join(' > '); };
+  const PROPS = ['outlineStyle', 'outlineWidth', 'outlineColor', 'outlineOffset', 'boxShadow',
+    'borderTopWidth', 'borderTopStyle', 'borderTopColor', 'borderRightWidth', 'borderRightStyle', 'borderRightColor',
+    'borderBottomWidth', 'borderBottomStyle', 'borderBottomColor', 'borderLeftWidth', 'borderLeftStyle', 'borderLeftColor',
+    'backgroundColor', 'backgroundImage'];
+  const all = [...document.querySelectorAll('a[href], button, input, select, textarea, summary, [tabindex], [role="button"], [role="link"], [contenteditable="true"]')];
+  const snaps = all.map((el) => { const s = getComputedStyle(el); return PROPS.map((p) => s[p]).join('|'); });
+  const cands = [];
+  all.forEach((el, i) => {
+    if (el.disabled || el.getAttribute('tabindex') === '-1' || el.closest('[inert]') || (el.tagName === 'INPUT' && el.type === 'hidden')) return;
+    const s = getComputedStyle(el); const r = el.getBoundingClientRect();
+    if (s.visibility === 'hidden' || s.display === 'none' || Number(s.opacity) <= 0.05 || r.width <= 1 || r.height <= 1 || r.right <= 0 || r.bottom <= 0) return;
+    cands.push(i);
+  });
+  window.__auditFocus = { all, snaps, PROPS };
+  return { sels: all.map(sel), cands };
+}
+
+// Runs inside the page after each Tab: which element has focus, and whether its focus style differs from its rest style.
+function focusStep() {
+  const sel = (el) => { const parts = []; let e = el; for (let i = 0; e && i < 4 && e !== document.body; i++, e = e.parentElement) { let s = e.tagName.toLowerCase(); if (e.id) { s += `#${e.id}`; parts.unshift(s); break; } const c = [...e.classList].slice(0, 2).join('.'); if (c) s += `.${c}`; parts.unshift(s); } return parts.join(' > '); };
+  const { all, snaps, PROPS } = window.__auditFocus;
+  const a = document.activeElement;
+  if (!a || a === document.body || a === document.documentElement) return { left: true };
+  const idx = all.indexOf(a);
+  let changed = null;
+  if (idx >= 0) { const s = getComputedStyle(a); changed = PROPS.map((p) => s[p]).join('|') !== snaps[idx]; }
+  return { left: false, idx, changed, sel: sel(a) };
+}
+
+// Runs inside the page: inputs, selects and textareas with no accessible name (aria-labelledby, aria-label,
+// title or a <label>). Placeholder text alone does not count as a name.
+function labelCheck() {
+  const sel = (el) => { const parts = []; let e = el; for (let i = 0; e && i < 4 && e !== document.body; i++, e = e.parentElement) { let s = e.tagName.toLowerCase(); if (e.id) { s += `#${e.id}`; parts.unshift(s); break; } const c = [...e.classList].slice(0, 2).join('.'); if (c) s += `.${c}`; parts.unshift(s); } return parts.join(' > '); };
+  const txt = (e) => (e.textContent || '').trim();
+  const bad = [];
+  for (const el of document.querySelectorAll('input, select, textarea')) {
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (el.tagName === 'INPUT' && ['hidden', 'submit', 'button'].includes(type)) continue;
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') continue;
+    const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+    const named = ids.some((id) => { const n = document.getElementById(id); return Boolean(n && txt(n)); })
+      || Boolean((el.getAttribute('aria-label') || '').trim())
+      || Boolean((el.getAttribute('title') || '').trim())
+      || Boolean(el.labels && [...el.labels].some((l) => txt(l)));
+    if (!named) bad.push(sel(el));
+  }
+  return bad;
+}
+
+// Runs inside the page: the SEO facts the seo check reads.
+function seoCheck() {
+  const meta = document.querySelector('meta[name="description"]');
+  return {
+    title: document.title.trim().slice(0, 200),
+    description: ((meta && meta.getAttribute('content')) || '').trim().slice(0, 300),
+    lang: (document.documentElement.getAttribute('lang') || '').trim(),
+    h1_count: document.querySelectorAll('h1').length,
+    img_no_dims: [...document.images].filter((i) => !i.hasAttribute('width') || !i.hasAttribute('height')).length,
+  };
+}
+
+// Runs inside the page in the reduced-motion load: text in the first two screens whose effective opacity is
+// below 0.1 or that is visibility hidden, and the number of infinite animations still running.
+function motionCheck() {
+  const sel = (el) => { const parts = []; let e = el; for (let i = 0; e && i < 4 && e !== document.body; i++, e = e.parentElement) { let s = e.tagName.toLowerCase(); if (e.id) { s += `#${e.id}`; parts.unshift(s); break; } const c = [...e.classList].slice(0, 2).join('.'); if (c) s += `.${c}`; parts.unshift(s); } return parts.join(' > '); };
+  const limit = 2 * window.innerHeight;
+  const hidden = [];
+  const seen = new Set();
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.textContent.trim().length > 1 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT });
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    const el = n.parentElement;
+    if (!el || seen.has(el) || ['SCRIPT', 'STYLE', 'NOSCRIPT'].includes(el.tagName)) continue;
+    seen.add(el);
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0 || r.top >= limit || r.bottom <= 0) continue;
+    let opacity = 1;
+    for (let e = el; e; e = e.parentElement) opacity *= Number(getComputedStyle(e).opacity);
+    if (opacity < 0.1 || getComputedStyle(el).visibility === 'hidden') hidden.push(sel(el));
+  }
+  const infinite = document.getAnimations().filter((a) => a.playState === 'running' && a.effect && a.effect.getComputedTiming().iterations === Infinity).length;
+  return { hidden: [...new Set(hidden)], infinite };
+}
+
+// Runs inside the page: transfer size from the navigation and resource timing entries (cross-origin resources
+// without Timing-Allow-Origin report 0, so this can undercount), and the largest LCP candidate (null when unsupported).
+async function perfCheck() {
+  let bytes = 0;
+  for (const e of [...performance.getEntriesByType('navigation'), ...performance.getEntriesByType('resource')]) bytes += e.transferSize || 0;
+  const lcp = await new Promise((resolve) => {
+    if (!window.PerformanceObserver || !(PerformanceObserver.supportedEntryTypes || []).includes('largest-contentful-paint')) return resolve(null);
+    let last = null;
+    const po = new PerformanceObserver((list) => { for (const e of list.getEntries()) last = e.startTime; });
+    po.observe({ type: 'largest-contentful-paint', buffered: true });
+    setTimeout(() => { po.disconnect(); resolve(last === null ? null : Math.round(last)); }, 150);
+  });
+  return { transfer_kb: Math.round(bytes / 1024), lcp_ms: lcp };
+}
 
 // Runs inside the page.
 function inPage({ isMobile, vw }) {
@@ -107,6 +272,7 @@ const { browser } = await launchBrowser(pw);
 const findings = [];
 const add = (severity, check, viewport, message, detail) => findings.push({ severity, check, viewport, message, detail });
 const per = {};
+let fatal = null;
 try {
   for (const vn of opt('--viewports', 'desktop,mobile').split(',')) {
     const vp = VIEWPORTS[vn]; if (!vp) throw new Error(`unknown viewport ${vn}`);
@@ -120,11 +286,27 @@ try {
     page.on('response', (r) => { if (r.status() >= 400) errs.push(`HTTP ${r.status()}: ${r.url().slice(0, 120)}`); });
     await page.goto(url, { waitUntil: 'load', timeout: 45000 });
     try { await page.waitForLoadState('networkidle', { timeout: 8000 }); } catch { /* busy pages */ }
+    await applySteps(page, vn);
     await page.evaluate(async () => { for (let y = 0; y < document.documentElement.scrollHeight; y += 600) { window.scrollTo(0, y); await new Promise((r) => setTimeout(r, 40)); } window.scrollTo(0, 0); });
     await page.addStyleTag({ content: '*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;transition-duration:0s!important;transition-delay:0s!important}' });
     await page.waitForTimeout(400);
     const r = await page.evaluate(inPage, { isMobile: Boolean(rest.isMobile), vw: width });
-    per[vn] = { overflow_px: r.overflow, contrast_checked: r.contrastChecked, contrast_not_measured: r.contrastUnmeasured, font_families: r.families, font_sizes: r.sizes };
+    const unlabeled = await page.evaluate(labelCheck);
+    const seo = await page.evaluate(seoCheck);
+    const dir = await page.evaluate(() => document.documentElement.dir);
+    const perf = await page.evaluate(perfCheck);
+    const focus = await walkFocus(page);
+    // Second load with reduced motion requested: no style override and no scroll, steps applied, then 1 s of settling.
+    const rm = await browser.newContext({ viewport: { width, height }, ...rest, reducedMotion: 'reduce' });
+    const rp = await rm.newPage();
+    await rp.goto(url, { waitUntil: 'load', timeout: 45000 });
+    try { await rp.waitForLoadState('networkidle', { timeout: 8000 }); } catch { /* busy pages */ }
+    await applySteps(rp, vn);
+    await rp.waitForTimeout(1000);
+    const motion = await rp.evaluate(motionCheck);
+    await rm.close();
+    per[vn] = { overflow_px: r.overflow, contrast_checked: r.contrastChecked, contrast_not_measured: r.contrastUnmeasured, font_families: r.families, font_sizes: r.sizes,
+      interaction: { focus_checked: focus.checked, focus_missing: focus.missing, unreachable: focus.unreachable, unlabeled_fields: unlabeled, reduced_motion_hidden: motion.hidden, infinite_animations: motion.infinite, seo, perf } };
     if (r.overflow > 1) add('error', 'overflow', vn, `Page is ${r.overflow}px wider than the viewport (horizontal scroll).`);
     for (const e of errs) add('error', 'console', vn, e);
     for (const b of r.imagesBroken) add('error', 'images', vn, `Broken image: ${b}`);
@@ -137,12 +319,30 @@ try {
     if (r.families.length > 3) add('warn', 'type', vn, `${r.families.length} font families in use`, r.families);
     if (r.sizes.length > 10) add('warn', 'type', vn, `${r.sizes.length} distinct font sizes (type scale sprawl)`, r.sizes);
     for (const s of [...new Set(r.emptyNames)].slice(0, 10)) add('error', 'empty-links', vn, `Link or button with no accessible name: ${s}`);
+    const it = per[vn].interaction;
+    if (it.unreachable.length) add('error', 'keyboard', vn, `${it.unreachable.length} visible interactive element(s) never reached by Tab`, it.unreachable.slice(0, 10));
+    if (it.focus_missing.length) add('error', 'keyboard', vn, `${it.focus_missing.length} focused element(s) with no visible focus indicator (outline, box-shadow, border and background unchanged on focus)`, it.focus_missing.slice(0, 10));
+    if (it.unlabeled_fields.length) add('error', 'labels', vn, `${it.unlabeled_fields.length} input(s), select(s) or textarea(s) without an accessible name`, it.unlabeled_fields.slice(0, 10));
+    if (it.reduced_motion_hidden.length) add('error', 'reduced-motion', vn, `${it.reduced_motion_hidden.length} text element(s) in the first two screens stay hidden with reduced motion (opacity below 0.1 or visibility hidden)`, it.reduced_motion_hidden.slice(0, 10));
+    if (it.infinite_animations) add('warn', 'reduced-motion', vn, `${it.infinite_animations} infinite animation(s) still running with reduced motion`);
+    const seoData = it.seo;
+    if (!seoData.title) add('warn', 'seo', vn, 'Missing <title>');
+    if (!seoData.description) add('warn', 'seo', vn, 'Missing meta description');
+    if (!seoData.lang) add('warn', 'seo', vn, 'Missing lang attribute on <html>');
+    if (seoData.h1_count !== 1) add('warn', 'seo', vn, `${seoData.h1_count} <h1> element(s) (expected 1)`);
+    if (it.perf.transfer_kb > 3000) add('warn', 'perf', vn, `Page transfers ${it.perf.transfer_kb} KB (budget 3000 KB)`);
+    if (it.perf.lcp_ms !== null && it.perf.lcp_ms > 4000) add('warn', 'perf', vn, `Largest Contentful Paint ${it.perf.lcp_ms} ms (budget 4000 ms)`);
+    if (RTL && dir !== 'rtl') add('error', 'rtl', vn, `<html dir> is "${dir || 'unset'}" after the steps, expected "rtl" (--rtl)`);
     await ctx.close();
   }
-} finally { await browser.close(); }
+} catch (e) { fatal = e; } finally { await browser.close(); }
+if (fatal) {
+  if (fatal.exit) { console.error(`audit: ${String(fatal.message).split('\n')[0]}`); process.exit(fatal.exit); }
+  throw fatal;
+}
 
 const errors = findings.filter((f) => f.severity === 'error').length;
-const report = { ok: errors === 0, url, errors, warnings: findings.length - errors, viewports: per, findings, at: new Date().toISOString() };
+const report = { checks_version: 2, ok: errors === 0, url, errors, warnings: findings.length - errors, viewports: per, findings, at: new Date().toISOString() };
 const out = opt('--out');
 if (out) { mkdirSync(dirname(out), { recursive: true }); writeFileSync(out, JSON.stringify(report, null, 2) + '\n'); }
 if (argv.includes('--json')) console.log(JSON.stringify(report, null, 2));
