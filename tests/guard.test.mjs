@@ -386,3 +386,33 @@ test('found on a real repo: building the baseline side-by-side reads frozen stil
   assert.equal(bash('mkdir -p cook/compare/baseline && node /x/cook/scripts/side-by-side.mjs --out cook/compare/baseline/all.jpg cook/refs/R01.png cook/baseline/stills/home-desktop-fold.png'), 0);
   assert.equal(bash('cp /tmp/x.png cook/baseline/stills/home-desktop-fold.png'), 2);
 });
+
+const ledgerEntries = () => ledgerText().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+test('Read, Glob and Grep are logged and never blocked, Read is allowed before step 5', () => {
+  setSteps(['0', '1']);
+  const read = run({ tool_name: 'Read', tool_input: { file_path: join(proj, 'src/App.jsx') } });
+  assert.equal(read.code, 0, 'a Read of design code is allowed before step 5');
+  const glob = run({ tool_name: 'Glob', tool_input: { pattern: 'src/**/*.jsx' } });
+  assert.equal(glob.code, 0, 'Glob is not blocked');
+  const grep = run({ tool_name: 'Grep', tool_input: { pattern: 'useState', path: join(proj, 'src') } });
+  assert.equal(grep.code, 0, 'Grep is not blocked');
+  const logged = ledgerEntries();
+  const r = logged.find((e) => e.tool === 'Read');
+  assert.equal(r.file, 'src/App.jsx', 'a Read logs the project-relative file');
+  assert.equal(r.session_id, 's1');
+  const g = logged.find((e) => e.tool === 'Glob');
+  assert.equal(g.file, 'src/**/*.jsx', 'a Glob logs its pattern');
+  const s = logged.find((e) => e.tool === 'Grep');
+  assert.equal(s.file, 'useState', 'a Grep logs its pattern');
+  assert.equal(s.path, 'src', 'a Grep logs the searched path, project-relative');
+});
+
+test('a Read logs a file under the judge round and a file outside the project as given', () => {
+  setSteps(['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8']);
+  assert.equal(run({ tool_name: 'Read', tool_input: { file_path: join(proj, 'cook/compare/r02/side.png') } }).code, 0);
+  assert.equal(run({ tool_name: 'Read', tool_input: { file_path: '/etc/hosts' } }).code, 0);
+  const files = ledgerEntries().filter((e) => e.tool === 'Read').map((e) => e.file);
+  assert.ok(files.includes('cook/compare/r02/side.png'));
+  assert.ok(files.includes('/etc/hosts'));
+});
