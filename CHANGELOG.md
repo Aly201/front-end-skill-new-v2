@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.1
+From a second external review (Gemini and Codex), each claim reproduced before fixing:
+- Opt-in: all three skills are manual-only (`disable-model-invocation: true`); run `/frontend-cook` for flagship landing pages and major redesigns, not routine UI work.
+- `SKILL.md` cut from about 4,000 to about 1,300 words; the per-step instructions moved unchanged to `references/workflow.md`, read before each step.
+- The guard no longer blocks the documented `journeys.mjs --out cook/reports/...` command.
+- A journey needs at least one step and one expectation (a page opened straight in a right-to-left language may skip steps: the dir check is its assertion); every state needs an expectation. Enforced by `journeys.mjs` and the gate.
+- Setup no longer counts MCP servers configured only for Codex (`~/.codex/config.toml`) as available to Claude Code; it says so and gives the command.
+- Git protection is a failure, not a warning: the prompt log `cook/.ledger.jsonl` must be ignored and nothing under `cook/` may already be tracked (git keeps tracking committed files even when ignored).
+
 ## 1.5.0
 Thanks to an external review by Gemini and Codex. The maintainer verified each finding before it was fixed here.
 

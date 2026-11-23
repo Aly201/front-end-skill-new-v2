@@ -1026,6 +1026,10 @@ function journeysCheck(g, r, newest) {
   if (!Array.isArray(js)) return [[false, 'cook/JOURNEYS.json missing or not a JSON array: write the main user tasks (sign up, choose a plan, contact, switch language)']];
   if (!js.length) return [[false, 'cook/JOURNEYS.json has no journeys: write at least one per page with a form or more than two links']];
   const out = [];
+  const empty = js.filter((j) => (!(j?.steps || []).length && j?.rtl !== true) || !(j?.expect || []).length
+    || (Array.isArray(j?.states) && j.states.some((st) => !(st?.expect || []).length)));
+  out.push(empty.length ? [false, `journeys with no steps or no expectations prove nothing: ${empty.map((j) => j?.name || '?').join(', ')}`]
+    : [true, 'every journey has steps and expectations (and every state has expectations)']);
   const needs = pagesOf(g).filter((p) => pageNeedsJourney(g, p));
   const uncovered = needs.filter((p) => !js.some((j) => j?.page === p));
   out.push(uncovered.length ? [false, `no journey on ${uncovered.join(', ')} (a page with a form or more than two links needs one in cook/JOURNEYS.json)`]

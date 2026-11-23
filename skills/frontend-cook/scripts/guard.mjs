@@ -42,8 +42,8 @@ const PROTECTED = [
 const JUDGE_FILE = /^cook\/judge\/[^/]+\/(?!summary\.json$)[^/]+\.json$/i;
 // Bash segments that name a script-written file. Allowed only when they read it or a script runs.
 const PROTECTED_NAMES = /GATES\.json|PREFLIGHT\.json|\.ledger\.jsonl|summary\.json|cook[\\/](judge|reports)\b|cook[\\/]baseline[\\/](meta|inventory|motion|checks|slop|probecheck)\.json|cook[\\/]baseline[\\/]audit-|cook[\\/]baseline[\\/]stills\b|\.abkey\.json/i;
-const READ_OR_SCRIPT = /^(node\s+\S*(gate|preflight|slop_scan|audit|shoot|baseline|regress|pair|side-by-side)\.mjs\b|cat\b|head\b|tail\b|ls\b|grep\b|jq\b|wc\b|test\b|\[|diff\b|cmp\b)/;
-const WRITE_BY_SCRIPTS = 'cook/GATES.json, PREFLIGHT.json, the ledger, judge summaries, reports and baseline files are written only by the scripts (gate.mjs, preflight.mjs, baseline.mjs, slop_scan.mjs, audit.mjs, shoot.mjs, regress.mjs, pair.mjs).';
+const READ_OR_SCRIPT = /^(node\s+\S*(gate|preflight|slop_scan|audit|shoot|baseline|regress|pair|journeys|side-by-side)\.mjs\b|cat\b|head\b|tail\b|ls\b|grep\b|jq\b|wc\b|test\b|\[|diff\b|cmp\b)/;
+const WRITE_BY_SCRIPTS = 'cook/GATES.json, PREFLIGHT.json, the ledger, judge summaries, reports and baseline files are written only by the scripts (gate.mjs, preflight.mjs, baseline.mjs, slop_scan.mjs, audit.mjs, shoot.mjs, regress.mjs, pair.mjs, journeys.mjs).';
 const AGENT_BROWSER = /\bagent-browser\b/i;
 const AGENT_BROWSER_TOOL = /agent[-_]browser/i;
 const AGENT_BROWSER_MSG = 'agent-browser is not used by this skill: take screenshots with shoot.mjs and check pages with audit.mjs.';

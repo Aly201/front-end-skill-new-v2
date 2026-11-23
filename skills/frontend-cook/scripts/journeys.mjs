@@ -48,6 +48,13 @@ function problemIn(list) {
     if (!Array.isArray(j.steps ?? [])) return `${where} "${j.name}": steps must be an array`;
     if (!Array.isArray(j.expect ?? [])) return `${where} "${j.name}": expect must be an array`;
     if (!Array.isArray(j.mock ?? [])) return `${where} "${j.name}": mock must be an array`;
+    // A journey with nothing to do or nothing to check proves nothing.
+    // A page opened straight in a right-to-left language may have no steps: the dir check is its assertion.
+    if (!(j.steps || []).length && j.rtl !== true) return `${where} "${j.name}": needs at least one step (the task the user performs)`;
+    if (!(j.expect || []).length) return `${where} "${j.name}": needs at least one expectation (what proves the task worked)`;
+    for (const st of Array.isArray(j.states) ? j.states : []) {
+      if (!st || !(st.expect || []).length) return `${where} "${j.name}": state "${st?.name ?? '?'}" needs at least one expectation`;
+    }
     const states = j.states ?? [];
     if (!Array.isArray(states)) return `${where} "${j.name}": states must be an array`;
     const stateSlugs = new Set();

@@ -68,7 +68,7 @@ function judgeReads(round, still, dir = proj) {
 // cook/JOURNEYS.json and the round's journeys report, as journeys.mjs writes them. fail and omit are [name, viewport]
 // pairs: a failing entry, or one with no result. sha: a wrong sha1 of the journeys file. The report is stamped after
 // the call, so it is newer than the sources written before it.
-const JOURNEY = { name: 'read the rope page', page: '/', viewports: ['desktop', 'mobile'], rtl: false, steps: [], expect: [{ text: 'Rope' }], mock: [] };
+const JOURNEY = { name: 'read the rope page', page: '/', viewports: ['desktop', 'mobile'], rtl: false, steps: [{ click: { role: 'link', name: 'Rope' } }], expect: [{ text: 'Rope' }], mock: [] };
 function journeysReport(d, r, { journeys = [JOURNEY], fail = [], omit = [], sha } = {}) {
   write(join(d, 'cook', 'JOURNEYS.json'), JSON.stringify(journeys));
   const entries = [];
@@ -1558,4 +1558,16 @@ test('item 8: RELEASE.md needs its four headings and every item checked; CREDITS
   assert.match(v8(), /FAIL {2}CREDITS\.md missing: R01, R02/, 'the Inspo and Awwwards references need credits');
   write(join(d, 'cook', 'CREDITS.md'), 'R01 to R09: Inspo and Awwwards captures, for layout study.\n');
   assert.match(v8(), /PASS {2}CREDITS\.md lists the outside sources/);
+});
+
+test('found in review: the gate refuses empty journeys even with a passing report', () => {
+  const d = newProject();
+  write(join(d, 'site', 'index.html'), page('<h1>Rope</h1><form><input name="q"><button>Go</button></form>'));
+  assert.equal(runGate(d, ['set-build', '--src', 'site', '--url', 'http://localhost:5173']).code, 0);
+  mkdirSync(join(d, 'cook', 'judge', 'r01'), { recursive: true });
+  const out = () => runGate(d, ['verify', '6a']).out;
+  journeysReport(d, 'r01', { journeys: [{ ...JOURNEY, name: 'Nothing', steps: [], expect: [] }] });
+  assert.match(out(), /FAIL {2}journeys with no steps or no expectations prove nothing: Nothing/);
+  journeysReport(d, 'r01', { journeys: [{ ...JOURNEY, name: 'Arabic page', rtl: true, steps: [] }] });
+  assert.match(out(), /PASS {2}every journey has steps and expectations/, 'a page opened straight in Arabic needs no steps: the dir check is its assertion');
 });

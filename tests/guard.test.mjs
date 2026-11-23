@@ -416,3 +416,12 @@ test('a Read logs a file under the judge round and a file outside the project as
   assert.ok(files.includes('cook/compare/r02/side.png'));
   assert.ok(files.includes('/etc/hosts'));
 });
+
+test('found in review: the documented journeys report command is allowed', () => {
+  const p = mkdtempSync(join(tmpdir(), 'guard-jr-'));
+  mkdirSync(join(p, 'cook', 'reports'), { recursive: true });
+  writeFileSync(join(p, 'cook', 'GATES.json'), JSON.stringify({ steps: { 0: { status: 'passed' } } }));
+  const bash = (command) => spawnSync(process.execPath, [GUARD], { input: JSON.stringify({ cwd: p, session_id: 's', hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command } }), encoding: 'utf8' }).status;
+  assert.equal(bash('node /x/skills/frontend-cook/scripts/journeys.mjs --round r01 --out cook/reports/journeys-r01.json'), 0);
+  assert.equal(bash('echo {} > cook/reports/journeys-r01.json'), 2, 'writing the report by hand stays blocked');
+});

@@ -180,3 +180,16 @@ test('without cook/JOURNEYS.json the run stops with exit 2 and names the file', 
   assert.equal(r.status, 2);
   assert.match(r.stderr, /no cook\/JOURNEYS\.json/);
 });
+
+test('found in review: a journey with no steps or no expectations is refused (exit 2)', async () => {
+  for (const [bad, why] of [
+    [{ name: 'Nothing', page: '/', viewports: ['desktop', 'mobile'], steps: [], expect: [] }, /at least one step/],
+    [{ name: 'Clicks only', page: '/', viewports: ['desktop', 'mobile'], steps: [{ click: { role: 'button', name: 'Menu' } }], expect: [] }, /at least one expectation/],
+    [{ name: 'Empty state', page: '/', steps: [{ click: { text: 'x' } }], expect: [{ text: 'x' }], states: [{ name: 'empty', steps: [] }] }, /state "empty" needs at least one expectation/],
+  ]) {
+    const dir = project('http://127.0.0.1:9/', [bad]);
+    const r = await runAsync(dir, ['--round', 'r01']);
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout + r.stderr, why);
+  }
+});

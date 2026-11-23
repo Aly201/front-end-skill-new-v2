@@ -1,6 +1,7 @@
 ---
 name: frontend-cook-setup
 description: Installs and verifies everything /frontend-cook needs before it will run, namely the cook skill, the Inspo MCP server, the Awwwards MCP server, the guard hook, Node 18+, ffmpeg and a working headless browser. Use when the user types /frontend-cook-setup, when /frontend-cook says setup failed, or when the user asks to install or check the frontend design skill's dependencies.
+disable-model-invocation: true
 ---
 
 # frontend-cook setup

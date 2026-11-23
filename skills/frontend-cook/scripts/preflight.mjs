@@ -40,7 +40,7 @@ function run(cmd, argv, timeout = 180000) {
   return { ok: r.status === 0, out: `${r.stdout || ''}${r.stderr || ''}`.trim(), missing: r.error?.code === 'ENOENT' };
 }
 
-// Every MCP server configured for this project, from Claude Code, Codex and .mcp.json.
+// Every MCP server Claude Code can use in this project: ~/.claude.json (user and local scope) and .mcp.json.
 function configuredMcps() {
   const found = {};
   const add = (name, cfg, where) => { found[name] = { cfg, where }; };
@@ -59,9 +59,15 @@ function configuredMcps() {
     const j = JSON.parse(readFileSync(join(cwd, '.mcp.json'), 'utf8'));
     for (const [n, c] of Object.entries(j.mcpServers || {})) add(n, c, '.mcp.json (project)');
   } catch { /* none */ }
+  return found;
+}
+
+// MCP servers configured for Codex only. Reported for information: Claude Code cannot use them.
+function codexMcps() {
+  const found = {};
   try {
     const t = readFileSync(join(homeDir(), '.codex', 'config.toml'), 'utf8');
-    for (const m of t.matchAll(/^\[mcp_servers\.([^\]]+)\]([\s\S]*?)(?=^\[|$(?![\s\S]))/gm)) add(m[1], m[2], '~/.codex/config.toml');
+    for (const m of t.matchAll(/^\[mcp_servers\.([^\]]+)\]([\s\S]*?)(?=^\[|$(?![\s\S]))/gm)) found[m[1]] = { cfg: m[2], where: '~/.codex/config.toml' };
   } catch { /* none */ }
   return found;
 }
@@ -132,7 +138,10 @@ for (const key of Object.keys(MCPS)) {
   C[`mcp_${key}`] = {
     ok: Boolean(hit),
     name: hit?.name,
-    detail: hit ? `${key} MCP configured as "${hit.name}" in ${hit.where}` : `${key} MCP not configured (${MCPS[key].why}). Run: claude ${MCPS[key].claudeAdd.join(' ')}`,
+    detail: hit ? `${key} MCP configured as "${hit.name}" in ${hit.where}`
+      : findMcp(key, codexMcps())
+        ? `${key} MCP is configured for Codex only (~/.codex/config.toml); Claude Code cannot use that. Run: claude ${MCPS[key].claudeAdd.join(' ')}`
+        : `${key} MCP not configured (${MCPS[key].why}). Run: claude ${MCPS[key].claudeAdd.join(' ')}`,
   };
 }
 
@@ -188,15 +197,22 @@ C.guard_hook = {
       : 'guard hook not installed in this project. Run preflight.mjs --install (it adds PreToolUse and UserPromptSubmit hooks to .claude/settings.json)',
 };
 
-// .gitignore: cook/ holds logged prompts and working state, so it must not be committed.
-// A warning only: it never makes result.ok false. With --install, cook/ is added inside a git repo.
+// .gitignore: cook/ holds logged prompts and working state, so it must not be committed. A failure, not a
+// warning: the prompt log must be ignored AND nothing under cook/ may already be tracked (git applies ignore
+// rules only to untracked files). With --install, cook/ is added to .gitignore; tracked files are reported,
+// never untracked automatically.
 const COOK_IGNORE_LINE = /^\/?cook\/?$/;
 function checkGitignore() {
   if (!run('git', ['rev-parse', '--is-inside-work-tree'], 15000).ok) {
     return { ok: true, detail: 'not a git repository, nothing to ignore' };
   }
-  const ignored = () => run('git', ['check-ignore', '-q', 'cook/GATES.json'], 15000).ok;
-  if (ignored()) return { ok: true, detail: 'cook/ is git-ignored' };
+  const ignored = () => ['cook/.ledger.jsonl', 'cook/GATES.json'].every((f) => run('git', ['check-ignore', '-q', '--no-index', f], 15000).ok);
+  const tracked = () => run('git', ['ls-files', '--', 'cook'], 15000).out.split('\n').filter(Boolean);
+  const trackedMsg = (t) => `files under cook/ are already committed (${t.slice(0, 3).join(', ')}${t.length > 3 ? ', ...' : ''}): git keeps tracking them even when ignored. Run: git rm -r --cached cook && git commit`;
+  if (ignored()) {
+    const t = tracked();
+    return t.length ? { ok: false, detail: trackedMsg(t) } : { ok: true, detail: 'cook/ is git-ignored and nothing under it is tracked (the prompt log stays local)' };
+  }
   if (INSTALL) {
     const gi = join(cwd, '.gitignore');
     const cur = existsSync(gi) ? readFileSync(gi, 'utf8') : '';
@@ -206,9 +222,9 @@ function checkGitignore() {
       writeFileSync(gi, `${head}${gap}# frontend-cook working state (contains logged prompts)\ncook/\n`);
       result.installed.push({ what: '.gitignore', ok: true, command: `added cook/ to ${gi}` });
     }
-    if (ignored()) return { ok: true, detail: 'cook/ added to .gitignore' };
+    if (ignored()) { const t = tracked(); return t.length ? { ok: false, detail: trackedMsg(t) } : { ok: true, detail: 'cook/ added to .gitignore' }; }
   }
-  return { ok: true, warn: true, detail: 'cook/ is not git-ignored: its logged prompts could be committed. Run preflight.mjs --install to add it to .gitignore' };
+  return { ok: false, detail: 'cook/ is not git-ignored: the prompt log (cook/.ledger.jsonl) could be committed. Run preflight.mjs --install to add it to .gitignore' };
 }
 C.gitignore = checkGitignore();
 if (C.gitignore.warn) result.warnings.push(C.gitignore.detail);

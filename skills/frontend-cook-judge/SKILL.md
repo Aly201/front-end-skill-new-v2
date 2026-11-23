@@ -1,6 +1,7 @@
 ---
 name: frontend-cook-judge
 description: Acts as the separate, fresh-context judge for a /frontend-cook run, scoring one round's screenshots against the references and the rubric without seeing the code, the brief or the builder's scores. Use when the user types /frontend-cook-judge, or asks for an independent or separate-session judge or grade of a frontend-cook round.
+disable-model-invocation: true
 ---
 
 # Separate judge for frontend-cook

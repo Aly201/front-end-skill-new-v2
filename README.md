@@ -62,6 +62,10 @@ Each check and how to fix it: `skills/frontend-cook/references/usability.md`.
 - Playwright with Chromium. Setup installs both automatically when they are missing (by hand: `npm i -D playwright && npx playwright install chromium`). A Chromium the scripts can find also works.
 - Installed by `/frontend-cook-setup` if missing: the cook skill, the Inspo MCP, the Awwwards MCP, the guard hook
 
+## When to use it
+
+Frontend Cook is opt-in and slow on purpose: references, a judged mockup, several judged rounds, browser and regression checks, and hours of active time. Use it for flagship landing pages, multi-page sites that set a new visual direction, and major redesigns. For routine UI work (a new form, a settings screen, a small fix), use a lighter design skill and test the affected screens. All three skills are manual-only: Claude never starts them on its own; you type `/frontend-cook`.
+
 ## Install
 
 ```bash
