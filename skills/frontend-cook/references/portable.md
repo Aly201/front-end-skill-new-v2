@@ -42,6 +42,24 @@ node <skill>/scripts/gate.mjs next
 
 Prints the next step, the section of `references/workflow.md` to read first, and up to 10 things still missing, in order. When a missing item needs the user, it says so. A weak or forgetful agent runs this after every action instead of guessing: do the first missing item, run `next` again, never claim a step is done until `gate.mjs verify <step>` exits 0.
 
+## Several agents, one project
+
+Every agent on every computer works from the same state, because `cook/` is committed with the project:
+
+- **`cook/STATUS.md`** is written by the gate after every change: the current step, the bar, the user's decisions (their exact words), the references (source, URL, what to take), the judged rounds and what is still missing. Every agent reads it first.
+- **The `AGENTS.md` block** (written by `gate.mjs init` and `gate.mjs share`, also into `CLAUDE.md` when the project has one) tells Codex, Cursor, Antigravity and Claude Code to read `cook/STATUS.md`, run `gate.mjs next`, use only the listed references, and never approve for the user. Only the text between the `frontend-cook` markers is touched.
+- **`cook/FILES.json`** keeps the real time each file last changed, with its content hash. A clone stamps every file with the checkout time, which would break every "stills newer than the code" check and every approval. With this record, a file whose content is unchanged keeps its real time on every computer; a file that really changed uses its new time.
+- **Stays on each computer** (git-ignored by `preflight.mjs --install`): the prompt log `cook/.ledger.jsonl`, `cook/PREFLIGHT.json` and `cook/.checkout`. Run setup on each computer. The user's words typed on one computer are recorded in `cook/GATES.json` once they are used in an approval, so they travel with it.
+
+The routine:
+
+1. `git pull`, then read `cook/STATUS.md`.
+2. One agent builds at a time. Others may judge (`judge.mjs`) or read.
+3. After every step or round: `node <skill>/scripts/gate.mjs share`, then commit `cook/` together with the build and push.
+4. A merge conflict in `cook/GATES.json`, `cook/FILES.json` or `cook/STATUS.md` means two agents built at once: stop and ask the user which side to keep, then run `gate.mjs share` again.
+
+**Keep the repository private.** `cook/refs/` holds screenshots of other people's sites; committing them to a public repository publishes them. Preflight warns when the GitHub repository is public.
+
 ## What still needs Claude Code
 
 These checks read the guard hook's log, so outside Claude Code they cannot pass on their own:
@@ -52,4 +70,4 @@ These checks read the guard hook's log, so outside Claude Code they cannot pass 
 
 ## A short brief for another agent
 
-> Use Frontend Cook. Before every step run `node <skill>/scripts/gate.mjs next` and do the first missing item; read the step's section in `references/workflow.md`. Never say a step is done until `gate.mjs verify <step>` exits 0. You cannot approve anything: when the user's words are needed, stop and ask them to run `node <skill>/scripts/gate.mjs say` (or `gate.mjs approve <kind>`) in their own terminal. Judges are `node <skill>/scripts/judge.mjs --round <round>`, run at least twice per round. Never edit files under `cook/judge/`, `cook/GATES.json` or `cook/reports/` by hand.
+> Use Frontend Cook. Run `git pull` and read `cook/STATUS.md` first. Before every step run `node <skill>/scripts/gate.mjs next` and do the first missing item; read the step's section in `references/workflow.md`. Never say a step is done until `gate.mjs verify <step>` exits 0. You cannot approve anything: when the user's words are needed, stop and ask them to run `node <skill>/scripts/gate.mjs say` (or `gate.mjs approve <kind>`) in their own terminal. Judges are `node <skill>/scripts/judge.mjs --round <round>`, run at least twice per round. After each step or round run `gate.mjs share`, then commit `cook/` with the build and push. Never edit files under `cook/judge/`, `cook/GATES.json`, `cook/FILES.json`, `cook/STATUS.md` or `cook/reports/` by hand.

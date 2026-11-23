@@ -1,7 +1,7 @@
 // Shared helpers for the frontend-cook scripts. No dependencies beyond Node 18+.
-import { existsSync, readFileSync, readdirSync, statSync, openSync, readSync, closeSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, openSync, readSync, closeSync, realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { join, resolve, dirname, extname } from 'node:path';
+import { join, resolve, dirname, extname, relative, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
@@ -24,8 +24,71 @@ export function readJson(path, fallback = null) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return fallback; }
 }
 
+// File times travel between computers through cook/FILES.json (committed with cook/). A clone or pull gives
+// every file the time of the checkout, which would break every "newer than the latest code change" check. So
+// FILES.json records, per file, its content hash and the time it was really last changed, and which checkout
+// recorded it. On another checkout, a file whose content still matches its entry gets the recorded time; on the
+// checkout that recorded it, and for any changed file, the disk time counts.
+const _fileState = { root: undefined, manifest: null, me: null, hashes: new Map() };
+function _stateRoot() {
+  if (_fileState.root === undefined) {
+    const r = projectRoot();
+    _fileState.root = existsSync(join(r, STATE_DIR, 'GATES.json')) ? r : null;
+    _fileState.manifest = _fileState.root ? readJson(join(_fileState.root, STATE_DIR, 'FILES.json'), null) : null;
+    _fileState.me = _fileState.root ? checkoutId(_fileState.root, false) : null;
+  }
+  return _fileState.root;
+}
+// This checkout's id: a random id in the git-ignored cook/.checkout, made on first need.
+export function checkoutId(root, create = true) {
+  const f = join(root, STATE_DIR, '.checkout');
+  try { const id = readFileSync(f, 'utf8').trim(); if (id) return id; } catch { /* none yet */ }
+  if (!create) return null;
+  const id = _createHash('sha1').update(`${Date.now()}:${Math.random()}:${process.pid}`).digest('hex').slice(0, 12);
+  try { writeFileSync(f, id + '\n'); } catch { /* read-only */ }
+  return id;
+}
+function _hashOf(path) {
+  if (!_fileState.hashes.has(path)) {
+    try { _fileState.hashes.set(path, _createHash('sha1').update(readFileSync(path)).digest('hex')); } catch { _fileState.hashes.set(path, null); }
+  }
+  return _fileState.hashes.get(path);
+}
 export function mtime(path) {
-  try { return statSync(path).mtimeMs; } catch { return 0; }
+  let st;
+  try { st = statSync(path); } catch { return 0; }
+  const root = _stateRoot();
+  const files = _fileState.manifest?.files;
+  if (root && files) {
+    const rel = relative(root, resolve(path)).split(sep).join('/');
+    const e = files[rel];
+    if (e && e.by !== _fileState.me && e.size === st.size && typeof e.mtime === 'number' && _hashOf(resolve(path)) === e.sha1) return e.mtime;
+  }
+  return st.mtimeMs;
+}
+// Record the files' real change times in cook/FILES.json for the other checkouts. On this checkout the disk time
+// is the truth; an entry from another checkout is kept while the content still matches it.
+export function syncFileTimes(root, paths) {
+  const fp = join(root, STATE_DIR, 'FILES.json');
+  const cur = readJson(fp, null) || { version: 1, files: {} };
+  const me = checkoutId(root);
+  const files = {};
+  for (const p of paths) {
+    let st; try { st = statSync(p); } catch { continue; }
+    if (!st.isFile()) continue;
+    const rel = relative(root, resolve(p)).split(sep).join('/');
+    const e = cur.files?.[rel];
+    if (e && e.by === me && e.mtime === st.mtimeMs && e.size === st.size) { files[rel] = e; continue; }
+    const sha1 = _createHash('sha1').update(readFileSync(p)).digest('hex');
+    if (e && e.by !== me && e.sha1 === sha1) { files[rel] = e; continue; }
+    files[rel] = { sha1, size: st.size, mtime: st.mtimeMs, by: me };
+  }
+  const next = { version: 1, files: Object.fromEntries(Object.keys(files).sort().map((k) => [k, files[k]])) };
+  const text = JSON.stringify(next, null, 1) + '\n';
+  let old = ''; try { old = readFileSync(fp, 'utf8'); } catch { /* new */ }
+  if (text !== old) writeFileSync(fp, text);
+  _fileState.root = undefined; _fileState.hashes.clear();
+  return Object.keys(files).length;
 }
 
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.astro', '.svelte-kit', '.turbo', '.vercel', 'coverage', 'cook', 'cook-archive', '.cache']);
@@ -342,3 +405,15 @@ export function isDesignFile(rel, gates = {}, text = null) {
 export const STEPS_NEW = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 export const STEPS_REDESIGN_ORDER = ['0', '0b', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
 export const STEP_SHORT_NAMES = { 0: 'setup', '0b': 'baseline', 1: 'references', 2: 'mockup', 3: 'bar', 4: 'time', 5: 'bans', '6a': 'static build', '6b': 'motion', 7: 'feedback', 8: 'separate judge' };
+
+// .gitignore for a shared cook/: only the files that belong to one computer. The old whole-folder line
+// (`cook/`, 1.6.0 and before) and its comment are removed; every other line is kept as it was.
+export const LOCAL_FILES = ['cook/.ledger.jsonl', 'cook/PREFLIGHT.json', 'cook/.checkout'];
+export const COOK_IGNORE_LINE = /^\/?cook\/?$/;
+export function cookIgnoreText(cur) {
+  const lines = String(cur || '').split(/\r?\n/).filter((l) => !COOK_IGNORE_LINE.test(l.trim()) && l.trim() !== '# frontend-cook working state (contains logged prompts)');
+  const missing = LOCAL_FILES.filter((f) => !lines.some((l) => l.trim() === f || l.trim() === `/${f}`));
+  let text = lines.join('\n').replace(/\n+$/, '');
+  if (missing.length) text += `${text ? '\n\n' : ''}# frontend-cook: local to this computer (the prompt log holds every prompt typed)\n${missing.join('\n')}`;
+  return text + '\n';
+}

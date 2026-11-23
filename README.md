@@ -90,6 +90,17 @@ The scripts are plain Node, so any agent that can run commands can use them. Thr
 
 Without the hook, step 1's logged Inspo/Awwwards calls and the active-time floor cannot be proven; they need your recorded override. Nothing is blocked in advance either: the gate only refuses to verify.
 
+## Several agents on one project
+
+All agents (Claude Code, Codex, Cursor, Antigravity, on any computer) share one state through git. `cook/` is committed with the project, except the prompt log, the preflight result and `cook/.checkout`, which stay on each computer.
+
+- `cook/STATUS.md`: the step, the bar, your decisions, the references and what is missing. Written by the gate, read first by every agent.
+- `AGENTS.md` (and `CLAUDE.md` if present): a short block that sends every agent to `cook/STATUS.md` and `gate.mjs next`.
+- `cook/FILES.json`: the real change time of each file, so a fresh clone does not look newer than it is and approvals made on one computer hold on another.
+- After each step or round: `gate.mjs share`, commit `cook/` with the build, push. One agent builds at a time.
+
+Keep the repository private: `cook/refs/` holds screenshots of other sites. Upgrading from 1.6.0: run `preflight.mjs --install` (it replaces the old `cook/` ignore line), then `gate.mjs share`, then commit `cook/`.
+
 ## Improving an existing site (redesign mode)
 
 For a site that already works and should be taken from 2/10 to 9/10 without breaking it. Setup, the references and the bar are the same; the difference is that the current site is measured first and every change is checked against it.

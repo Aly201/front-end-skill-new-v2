@@ -11,7 +11,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, realpathSync } from
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { findSkill, loadPlaywright, loadPackage, launchBrowser, homeDir, STATE_DIR } from './_common.mjs';
+import { findSkill, loadPlaywright, loadPackage, cookIgnoreText, LOCAL_FILES, COOK_IGNORE_LINE, launchBrowser, homeDir, STATE_DIR } from './_common.mjs';
 
 const args = new Set(process.argv.slice(2));
 const INSTALL = args.has('--install');
@@ -197,37 +197,53 @@ C.guard_hook = {
       : 'guard hook not installed in this project. Run preflight.mjs --install (it adds PreToolUse and UserPromptSubmit hooks to .claude/settings.json)',
 };
 
-// .gitignore: cook/ holds logged prompts and working state, so it must not be committed. A failure, not a
-// warning: the prompt log must be ignored AND nothing under cook/ may already be tracked (git applies ignore
-// rules only to untracked files). With --install, cook/ is added to .gitignore; tracked files are reported,
-// never untracked automatically.
-const COOK_IGNORE_LINE = /^\/?cook\/?$/;
+// .gitignore: cook/ is shared through git (references, gates, judges, STATUS.md), so every agent on every computer
+// sees the same state. Only what belongs to one computer stays out: the prompt log (it holds every prompt typed),
+// the preflight result and the checkout id. A failure, not a warning, when the prompt log could be committed or
+// already is. With --install, these lines are added, and the old whole-folder line `cook/` (1.6.0 and before) is
+// replaced. Tracked local files are reported, never untracked automatically.
 function checkGitignore() {
   if (!run('git', ['rev-parse', '--is-inside-work-tree'], 15000).ok) {
     return { ok: true, detail: 'not a git repository, nothing to ignore' };
   }
-  const ignored = () => ['cook/.ledger.jsonl', 'cook/GATES.json'].every((f) => run('git', ['check-ignore', '-q', '--no-index', f], 15000).ok);
-  const tracked = () => run('git', ['ls-files', '--', 'cook'], 15000).out.split('\n').filter(Boolean);
-  const trackedMsg = (t) => `files under cook/ are already committed (${t.slice(0, 3).join(', ')}${t.length > 3 ? ', ...' : ''}): git keeps tracking them even when ignored. Run: git rm -r --cached cook && git commit`;
-  if (ignored()) {
+  const isIgnored = (f) => run('git', ['check-ignore', '-q', '--no-index', f], 15000).ok;
+  const localIgnored = () => LOCAL_FILES.every(isIgnored);
+  const shared = () => !isIgnored('cook/GATES.json');
+  const tracked = () => run('git', ['ls-files', '--', ...LOCAL_FILES], 15000).out.split('\n').filter(Boolean);
+  const trackedMsg = (t) => `${t.join(', ')} ${t.length > 1 ? 'are' : 'is'} already committed: git keeps tracking ${t.length > 1 ? 'them' : 'it'} even when ignored. Run: git rm --cached ${t.join(' ')} && git commit`;
+  const verdict = () => {
     const t = tracked();
-    return t.length ? { ok: false, detail: trackedMsg(t) } : { ok: true, detail: 'cook/ is git-ignored and nothing under it is tracked (the prompt log stays local)' };
-  }
+    if (t.length) return { ok: false, detail: trackedMsg(t) };
+    if (!shared()) return { ok: false, detail: 'cook/ is git-ignored as a whole, so other agents and computers cannot see the references or the status. Run preflight.mjs --install to ignore only the local files' };
+    return { ok: true, detail: 'cook/ is shared through git; the prompt log, the preflight result and cook/.checkout stay on this computer' };
+  };
+  if (localIgnored() && (shared() || !INSTALL)) return verdict();
   if (INSTALL) {
     const gi = join(cwd, '.gitignore');
     const cur = existsSync(gi) ? readFileSync(gi, 'utf8') : '';
-    if (!cur.split(/\r?\n/).some((l) => COOK_IGNORE_LINE.test(l.trim()))) {
-      const head = cur && !cur.endsWith('\n') ? cur + '\n' : cur;
-      const gap = head.trim() ? '\n' : '';
-      writeFileSync(gi, `${head}${gap}# frontend-cook working state (contains logged prompts)\ncook/\n`);
-      result.installed.push({ what: '.gitignore', ok: true, command: `added cook/ to ${gi}` });
+    const text = cookIgnoreText(cur);
+    if (text !== cur) {
+      writeFileSync(gi, text);
+      result.installed.push({ what: '.gitignore', ok: true, command: `${cur.split(/\r?\n/).some((l) => COOK_IGNORE_LINE.test(l.trim())) ? 'replaced the whole-folder cook/ line with' : 'added'} ${LOCAL_FILES.join(', ')} in ${gi}` });
     }
-    if (ignored()) { const t = tracked(); return t.length ? { ok: false, detail: trackedMsg(t) } : { ok: true, detail: 'cook/ added to .gitignore' }; }
+    if (localIgnored()) return verdict();
   }
-  return { ok: false, detail: 'cook/ is not git-ignored: the prompt log (cook/.ledger.jsonl) could be committed. Run preflight.mjs --install to add it to .gitignore' };
+  return { ok: false, detail: `the prompt log could be committed: ${LOCAL_FILES.filter((f) => !isIgnored(f)).join(', ')} not git-ignored. Run preflight.mjs --install` };
+}
+// Public repository: committing cook/ publishes the reference screenshots (other people's sites). A warning:
+// make the repository private before committing cook/.
+function checkPublicRepo() {
+  const url = run('git', ['remote', 'get-url', 'origin'], 15000);
+  const m = url.ok && url.out.match(/github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\s*$/);
+  if (!m) return null;
+  const r = run('curl', ['-s', '-o', process.platform === 'win32' ? 'NUL' : '/dev/null', '-w', '%{http_code}', '--max-time', '8', `https://api.github.com/repos/${m[1]}/${m[2]}`], 15000);
+  if (r.ok && r.out.trim() === '200') return `the GitHub repository ${m[1]}/${m[2]} is public: committing cook/ would publish the reference screenshots (other people's sites). Make it private before you commit cook/`;
+  return null;
 }
 C.gitignore = checkGitignore();
 if (C.gitignore.warn) result.warnings.push(C.gitignore.detail);
+const publicWarn = args.has('--offline') ? null : checkPublicRepo();
+if (publicWarn) { result.warnings.push(publicWarn); result.public_repo = true; }
 
 // Project folder: Claude Code loads a nested .claude/settings.json only from the folder it starts in, so a
 // session started in a parent folder runs without the guard hook. A warning only: it never makes result.ok false.

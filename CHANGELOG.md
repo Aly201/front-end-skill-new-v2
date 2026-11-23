@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.7.0
+Every agent on every computer shares the same references and status:
+- `cook/` is now committed with the project. Only the prompt log (`cook/.ledger.jsonl`), `cook/PREFLIGHT.json` and the new `cook/.checkout` stay local. `preflight.mjs --install` replaces the old whole-folder `cook/` ignore line; a committed prompt log fails setup.
+- `cook/STATUS.md`, written after every change of state: step, bar, the user's decisions, the references (source, URL, what to take), judged rounds and what is still missing.
+- `gate.mjs init` and the new `gate.mjs share` write a marked block into `AGENTS.md` (and `CLAUDE.md` when present) that sends every agent to `cook/STATUS.md` and `gate.mjs next`.
+- `cook/FILES.json` keeps each file's real change time and content hash, so freshness checks and approvals survive a clone or pull. A file whose content changed uses its new time.
+- Preflight warns when the GitHub repository is public (committing `cook/refs/` would publish other sites' screenshots).
+- The guard protects `cook/STATUS.md`, `cook/FILES.json` and `cook/.checkout`, and allows `git add`, `commit`, `pull`, `push` and other read or sync commands that name files in `cook/`.
+
 ## 1.6.0
 Works on any coding platform (Codex, Cursor, Antigravity, ...), and holds a weaker or forgetful agent to the steps:
 - `gate.mjs say` and `gate.mjs approve <kind>` (without `--quote`): the user types their words in their own interactive terminal; they are recorded in the ledger as `UserTTY` and count wherever the user's words are needed. Both refuse to run without a terminal, so an agent cannot answer them.

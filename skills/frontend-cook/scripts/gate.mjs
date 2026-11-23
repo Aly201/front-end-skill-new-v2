@@ -50,7 +50,7 @@ import { join, resolve, extname, basename, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { isMain, projectRoot, readJson, mtime, walk, newestMtime, imageSize, median, STATE_DIR, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, unallowedMotion, pageSlug, pageUrl, normUrl, isDesignFile, isExcluded, lineHash } from './_common.mjs';
+import { isMain, projectRoot, readJson, mtime, walk, syncFileTimes, newestMtime, imageSize, median, STATE_DIR, FRONTEND_EXT, readLedger, activeHours, userSaid, motionHits, unallowedMotion, pageSlug, pageUrl, normUrl, isDesignFile, isExcluded, lineHash } from './_common.mjs';
 import { isWaivedBy } from './_inventory.mjs';
 
 export const STEPS = ['0', '1', '2', '3', '4', '5', '6a', '6b', '7', '8'];
@@ -103,7 +103,101 @@ function load() {
   if (!g) fail(`No ${STATE_DIR}/GATES.json here or above. Run: node gate.mjs init --project <name>`);
   return g;
 }
-function save(g) { writeFileSync(GATES, JSON.stringify(g, null, 2) + '\n'); }
+function save(g, missing = null) { writeFileSync(GATES, JSON.stringify(g, null, 2) + '\n'); share(g, missing); }
+
+// ---------------- shared state (every agent, every computer) ----------------
+// cook/ is committed, except what belongs to one computer: the prompt log, the preflight result and the checkout id.
+// After every change of state the gate records the real file times (cook/FILES.json, see _common.mjs) and writes
+// cook/STATUS.md, the page every agent reads first.
+export const LOCAL_ONLY = ['.ledger.jsonl', 'PREFLIGHT.json', '.checkout'];
+const GENERATED = ['FILES.json', 'STATUS.md'];
+function sharedFiles(g) {
+  const inCook = walk(S()).filter((f) => {
+    const rel = relative(S(), f).split(sep).join('/');
+    return !LOCAL_ONLY.includes(rel) && !GENERATED.includes(rel);
+  });
+  return [...new Set([...inCook, ...srcFiles(g), ...designSrcFiles(g)])];
+}
+function share(g, missing = null) {
+  try { syncFileTimes(root, sharedFiles(g)); } catch (e) { console.error(`gate: could not record file times (${e.message})`); }
+  try { writeFileSync(S('STATUS.md'), statusMarkdown(g, missing)); } catch (e) { console.error(`gate: could not write STATUS.md (${e.message})`); }
+}
+const cell = (t) => String(t ?? '').replace(/\|/g, '/').replace(/\s+/g, ' ').trim();
+function statusMarkdown(g, missing) {
+  const L = [];
+  const n = nextStep(g);
+  L.push(`# Frontend Cook status: ${cell(g.project)}`, '');
+  L.push('Written by `gate.mjs` after every change. Do not edit it by hand. Every agent on this project reads it first, then runs `node <skill>/scripts/gate.mjs next`.', '');
+  L.push(`- Mode: ${g.mode === 'redesign' ? 'redesign of an existing site' : 'new design'}; type ${typeOf(g)}; languages ${langsOf(g).join(', ')}; pages ${pagesOf(g).join(', ')}`);
+  L.push(`- Bar: judges ${g.target.judge}/10 calibrated, no dimension under ${g.target.floor}, mockup ${g.target.mockup ?? '-'}; calibration offset ${g.calibration.offset}`);
+  if (g.time) L.push(`- Time: ${g.time.mode} ${g.time.hours}h`);
+  if (g.build?.src) L.push(`- Build: \`${cell(g.build.src)}\`${g.build.url ? ` at ${cell(g.build.url)}` : ''}`);
+  L.push(`- Next: ${n ? `step ${n} (${STEP_NAMES[n]}). Read its section in \`references/workflow.md\`, then \`gate.mjs check ${n}\`.` : 'all steps passed; finish with `gate.mjs report`.'}`, '');
+  L.push('## Steps', '', '| Step | Status | What | When |', '|---|---|---|---|');
+  for (const st of stepsFor(g)) {
+    const x = g.steps[st] || { status: 'pending' };
+    L.push(`| ${st} | ${x.status}${x.status === 'overridden' ? ` (user: "${cell(g.overrides?.[st]?.quote)}")` : ''} | ${cell(STEP_NAMES[st])} | ${cell(x.at ? x.at.slice(0, 16).replace('T', ' ') : '')} |`);
+  }
+  if (missing && n) {
+    L.push('', `## Still missing for step ${n}`, '');
+    if (!missing.length) L.push(`Nothing: run \`gate.mjs verify ${n}\`.`);
+    missing.slice(0, 15).forEach((m, i) => L.push(`${i + 1}. ${cell(m)}`));
+  }
+  const appr = Object.entries(g.approvals || {});
+  L.push('', '## The user\'s decisions', '');
+  if (!appr.length && !g.user_refs_none && !Object.keys(g.overrides || {}).length) L.push('None yet. Only the user approves: in Claude Code in chat, elsewhere with `gate.mjs say` or `gate.mjs approve <kind>` in their own terminal.');
+  for (const [k, a] of appr) L.push(`- Approved ${k}${a.at ? ` (${a.at.slice(0, 10)})` : ''}: "${cell(a.quote)}"`);
+  if (g.user_refs_none) L.push(`- No references of their own: "${cell(g.user_refs_none)}"`);
+  for (const [k, o] of Object.entries(g.overrides || {})) L.push(`- Override of step ${k}: "${cell(o.quote)}" (${cell(o.reason)})`);
+  L.push('', '## References', '');
+  let src = ''; try { src = readFileSync(S('refs', 'SOURCES.md'), 'utf8'); } catch { /* none yet */ }
+  const refs = src.split(/\r?\n/).map((l) => l.trim()).filter((l) => /^\|?\s*R\d+/.test(l));
+  if (!refs.length) L.push('None yet (step 1). Ask the user for theirs first; then search Inspo and Awwwards.');
+  else {
+    L.push('Every agent uses these, and only these: the images are in `cook/refs/`, what to take from each is in `cook/SHOTS.md`, the brief in `cook/BRIEF.md`.', '', '| Ref | Source | URL | Take |', '|---|---|---|---|');
+    for (const l of refs) { const c = l.replace(/^\||\|$/g, '').split('|').map((x) => x.trim()); L.push(`| ${cell(c[0])} | ${cell(c[1])} | ${cell(c[2])} | ${cell(c.slice(3).join('; '))} |`); }
+  }
+  const rs = rounds();
+  if (rs.length) {
+    L.push('', '## Judged rounds', '', '| Round | Judges | Calibrated overall | Weakest |', '|---|---|---|---|');
+    for (const r of rs.slice(-8)) { const x = summaryFor(r); if (x) L.push(`| ${r} | ${x.judges} | ${x.calibrated?.overall ?? '-'} | ${cell((x.weakest || []).join(', '))} |`); }
+  }
+  L.push('', '## Working together', '');
+  L.push('- One agent builds at a time. Before you start: `git pull`. After every step or round: `node <skill>/scripts/gate.mjs share`, then commit `cook/` and the build together and push.');
+  L.push('- On a new computer: run setup first (`preflight.mjs --install --write`). The prompt log, the preflight result and `cook/.checkout` stay on each computer.');
+  L.push('- Never edit `cook/GATES.json`, `cook/FILES.json`, this file, `cook/judge/` or `cook/reports/` by hand. If git reports a conflict in them, stop and ask the user.');
+  return L.join('\n') + '\n';
+}
+// The block every coding agent reads on its own: AGENTS.md (Codex, Cursor, Antigravity and others) and,
+// when the project has one, CLAUDE.md. Only the text between the markers is ours.
+const AG_START = '<!-- frontend-cook:start -->', AG_END = '<!-- frontend-cook:end -->';
+function agentsBlock(g) {
+  return [AG_START, '## Frontend design: Frontend Cook', '',
+    `This project's frontend design runs through the Frontend Cook skill (project "${cell(g.project)}"). Every agent follows the same steps and uses the same references.`, '',
+    '1. Read `cook/STATUS.md` first: the current step, the bar, the user\'s decisions and the references.',
+    '2. Run `node <skill>/scripts/gate.mjs next` and do the first missing item. `<skill>` is the `frontend-cook` skill folder (for example `.claude/skills/frontend-cook`).',
+    '3. Use only the references listed in `cook/STATUS.md` (`cook/refs/`, `cook/SHOTS.md`). Do not search for new ones unless step 1 is reopened.',
+    '4. A step is done only when `gate.mjs verify <step>` exits 0. Never write "done" before that.',
+    '5. You cannot approve anything. When the user\'s words are needed, stop and ask them to run `node <skill>/scripts/gate.mjs say` (or `gate.mjs approve <kind>`) in their own terminal.',
+    '6. Judges: `node <skill>/scripts/judge.mjs --round <round>` (or, in Claude Code, `/frontend-cook-judge` in a new session).',
+    '7. After each step or round: `node <skill>/scripts/gate.mjs share`, then commit `cook/` with the build and push. `git pull` before you start.',
+    '8. Never edit `cook/GATES.json`, `cook/FILES.json`, `cook/STATUS.md`, `cook/judge/` or `cook/reports/` by hand.',
+    AG_END].join('\n');
+}
+export function writeAgentsBlock(g, dir = root) {
+  const done = [];
+  for (const name of ['AGENTS.md', 'CLAUDE.md']) {
+    const f = join(dir, name);
+    if (name === 'CLAUDE.md' && !existsSync(f)) continue;
+    const cur = existsSync(f) ? readFileSync(f, 'utf8') : '';
+    const block = agentsBlock(g);
+    const i = cur.indexOf(AG_START), j = cur.indexOf(AG_END);
+    const next = i >= 0 && j > i ? cur.slice(0, i) + block + cur.slice(j + AG_END.length)
+      : `${cur}${cur && !cur.endsWith('\n') ? '\n' : ''}${cur.trim() ? '\n' : ''}${block}\n`;
+    if (next !== cur) { writeFileSync(f, next); done.push(name); }
+  }
+  return done;
+}
 function fail(msg) { console.error(`gate: ${msg}`); process.exit(2); }
 const argv = process.argv.slice(2);
 const opt = (k, d = null) => { const i = argv.indexOf(k); return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : d; };
@@ -1426,6 +1520,8 @@ if (isMainRun) {
       const pre = C.preflight();
       if (pre[0]) { g.steps['0'] = { status: 'passed', at: new Date().toISOString(), evidence: [pre[1]] }; save(g); }
       console.log(`created cook/GATES.json for "${project}". Step 0: ${pre[0] ? 'passed' : 'NOT passed: ' + pre[1]}`);
+      const ag = writeAgentsBlock(g);
+      if (ag.length) console.log(`added the Frontend Cook block to ${ag.join(' and ')}: every coding agent on this project reads it`);
       break;
     }
     case 'status': {
@@ -1680,12 +1776,27 @@ if (isMainRun) {
       console.log(`recorded your words: "${words}"\nThe agent can now use them with --quote "${words}".`);
       break;
     }
+    case 'share': {
+      // Make the state ready to commit: file times, STATUS.md (with what is missing) and the AGENTS.md block.
+      const g = load();
+      const n = nextStep(g);
+      const open = n ? [...startChecks(g, n), ...doneChecks(g, n)].filter(([ok]) => !ok).map(([, m]) => m) : [];
+      share(g, open);
+      const ag = writeAgentsBlock(g);
+      const nFiles = Object.keys(readJson(S('FILES.json'))?.files || {}).length;
+      console.log(`shared state written: cook/STATUS.md, cook/FILES.json (${nFiles} files)${ag.length ? `, and the block in ${ag.join(' and ')}` : ''}.`);
+      const gi = spawnSync('git', ['check-ignore', '-q', '--no-index', 'cook/GATES.json'], { cwd: root });
+      if (gi.status === 0) console.log('WARNING: cook/ is git-ignored, so other agents will not see it. Run preflight.mjs --install to ignore only the local files.');
+      console.log('Now commit cook/ together with the build, and push. Other agents: git pull, then read cook/STATUS.md.');
+      break;
+    }
     case 'next': {
       const g = load();
       const n = nextStep(g);
       if (!n) { console.log('All steps passed. Finish with: gate.mjs report'); break; }
       const checks = [...startChecks(g, n), ...doneChecks(g, n)];
       const open = checks.filter(([ok]) => !ok).map(([, m]) => m);
+      share(g, open);
       console.log(`NEXT: step ${n} (${STEP_NAMES[n]}).`);
       console.log(`READ FIRST: <skill>/references/workflow.md, the section for step ${n}.`);
       if (!open.length) console.log(`Every requirement holds: run gate.mjs verify ${n}`);
