@@ -2,7 +2,7 @@
 // Claude Code hook for frontend-cook. Installed into the project's .claude/settings.json by
 // preflight.mjs --install. It does nothing in projects without cook/GATES.json.
 //
-// PreToolUse (Write, Edit, MultiEdit, NotebookEdit, Bash, mcp__*):
+// PreToolUse (Write, Edit, MultiEdit, NotebookEdit, Bash, Read, Glob, Grep, mcp__*):
 //   - the project root for a file tool is the folder that holds cook/GATES.json above the file
 //     (rootForFile), so a sub-project works when the session starts in a monorepo root
 //   - blocks design files before step 5 (mockup, bar, time, bans): markup and style files in the
@@ -19,6 +19,8 @@
 //   - blocks agent-browser: this skill takes screenshots with shoot.mjs and checks with audit.mjs
 //   - logs every call to cook/.ledger.jsonl (time, session, agent, tool, file, command), which
 //     proves which session built and which one judged, and how long the work really took
+//   - Read, Glob and Grep are logged and never blocked: a Read logs the project-relative file, a Glob or
+//     Grep logs its pattern (and the searched path). The judge checks read these entries
 // UserPromptSubmit: logs the user's words (gate.mjs checks quotes against them) and adds one line
 //   with the current step, so the run stays on the steps, also after a context compaction.
 //
@@ -173,6 +175,22 @@ if (input.hook_event_name === 'UserPromptSubmit') {
 }
 
 if (AGENT_BROWSER_TOOL.test(tool)) block(AGENT_BROWSER_MSG);
+// Read, Glob and Grep: logged, never blocked, also before step 5 (a judge must be able to read the build).
+if (tool === 'Read' || tool === 'Glob' || tool === 'Grep') {
+  const relOf = (p) => {
+    const a = isAbsolute(p) ? p : resolve(cwd, p);
+    const r = relative(root, a).split('\\').join('/');
+    return r.startsWith('..') ? a : r;
+  };
+  if (tool === 'Read') {
+    log('Read', fileArg ? relOf(fileArg) : null);
+  } else {
+    const pattern = typeof ti.pattern === 'string' ? ti.pattern : null;
+    const searched = typeof ti.path === 'string' && ti.path ? relOf(ti.path) : null;
+    log(tool, pattern, searched ? { path: searched } : {});
+  }
+  process.exit(0);
+}
 if (tool.startsWith('mcp__')) {
   log(tool, null);
   process.exit(0);

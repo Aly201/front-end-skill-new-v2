@@ -148,10 +148,17 @@ function hookState() {
   } catch {
     return { j, invalid: true, ok: false };
   }
-  const has = (ev) => (j.hooks?.[ev] || []).some((m) => (m.hooks || []).some((h) => h.command === guardCmd));
-  const pre = (j.hooks?.PreToolUse || []).find((m) => (m.hooks || []).some((h) => h.command === guardCmd));
-  const matcherOk = Boolean(pre && ['Write', 'Edit', 'MultiEdit', 'Bash'].every((t) => new RegExp(`(^|\\|)${t}(\\||$)`).test(pre.matcher || '')) && /mcp__/.test(pre.matcher));
-  return { j, invalid: false, ok: has('PreToolUse') && has('UserPromptSubmit') && matcherOk && existsSync(GUARD) };
+  // Matchers (or UserPromptSubmit entries) that hold the guard command.
+  const guardMatchers = (ev) => (j.hooks?.[ev] || []).filter((m) => (m.hooks || []).some((h) => h.command === guardCmd));
+  const pres = guardMatchers('PreToolUse');
+  const pre = pres[0];
+  // A matcher without Read, Glob or Grep is an older install: it is outdated and --install upgrades it.
+  const needTools = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'Bash', 'Read', 'Glob', 'Grep'];
+  const matcherOk = Boolean(pre && needTools.every((t) => new RegExp(`(^|\\|)${t}(\\||$)`).test(pre.matcher || '')) && /mcp__/.test(pre.matcher));
+  // Exactly one guard entry per event: duplicates are cleaned up by --install.
+  const single = pres.length === 1 && guardMatchers('UserPromptSubmit').length === 1;
+  const present = pres.length > 0 || guardMatchers('UserPromptSubmit').length > 0;
+  return { j, invalid: false, present, ok: pres.length > 0 && guardMatchers('UserPromptSubmit').length > 0 && matcherOk && single && existsSync(GUARD) };
 }
 let hs = hookState();
 if (hs.invalid && INSTALL) {
@@ -162,9 +169,9 @@ if (!hs.ok && !hs.invalid && INSTALL) {
   j.hooks = j.hooks || {};
   // Drop stale frontend-cook entries (e.g. from an old install path), then add ours.
   for (const ev of ['PreToolUse', 'UserPromptSubmit']) {
-    j.hooks[ev] = (j.hooks[ev] || []).map((m) => ({ ...m, hooks: (m.hooks || []).filter((h) => !/frontend-cook[\\/]scripts[\\/]guard\.mjs/.test(h.command || '')) })).filter((m) => m.hooks.length);
+    j.hooks[ev] = (j.hooks[ev] || []).map((m) => ({ ...m, hooks: (m.hooks || []).filter((h) => h.command !== guardCmd && !/frontend-cook[\\/]scripts[\\/]guard\.mjs/.test(h.command || '')) })).filter((m) => m.hooks.length);
   }
-  j.hooks.PreToolUse.push({ matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__.*', hooks: [{ type: 'command', command: guardCmd }] });
+  j.hooks.PreToolUse.push({ matcher: 'Write|Edit|MultiEdit|NotebookEdit|Bash|Read|Glob|Grep|mcp__.*', hooks: [{ type: 'command', command: guardCmd }] });
   j.hooks.UserPromptSubmit.push({ hooks: [{ type: 'command', command: guardCmd }] });
   mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(j, null, 2) + '\n');
@@ -176,7 +183,9 @@ C.guard_hook = {
   ok: hs.ok,
   detail: hs.invalid
     ? `settings.json is not valid JSON (${settingsPath}). Fix or remove it, then run preflight.mjs --install again`
-    : hs.ok ? `guard hook active in .claude/settings.json (${GUARD})` : 'guard hook not installed in this project. Run preflight.mjs --install (it adds PreToolUse and UserPromptSubmit hooks to .claude/settings.json)',
+    : hs.ok ? `guard hook active in .claude/settings.json (${GUARD})`
+      : hs.present ? 'guard hook is outdated or duplicated in .claude/settings.json (its matcher lacks Read, Glob or Grep, or it appears twice). Run preflight.mjs --install to upgrade it'
+      : 'guard hook not installed in this project. Run preflight.mjs --install (it adds PreToolUse and UserPromptSubmit hooks to .claude/settings.json)',
 };
 
 // .gitignore: cook/ holds logged prompts and working state, so it must not be committed.

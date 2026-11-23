@@ -1,0 +1,63 @@
+[
+  {
+    "name": "Sign up",
+    "page": "/",
+    "viewports": ["desktop", "mobile"],
+    "rtl": false,
+    "steps": [
+      { "click": { "role": "link", "name": "Sign up" } }
+    ],
+    "expect": [
+      { "visible": { "role": "heading", "name": "Create your account" } }
+    ],
+    "mock": [
+      { "url": "/api/signup", "status": 200, "body": { "ok": true } }
+    ],
+    "states": [
+      {
+        "name": "error",
+        "steps": [
+          { "click": { "role": "button", "name": "Create account" } }
+        ],
+        "expect": [
+          { "text": "Email is required" }
+        ]
+      },
+      {
+        "name": "success",
+        "steps": [
+          { "fill": { "label": "Email", "value": "guest@example.com" } },
+          { "click": { "role": "button", "name": "Create account" } }
+        ],
+        "expect": [
+          { "text": "Check your inbox" }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "Switch language to Arabic",
+    "page": "/",
+    "viewports": ["desktop", "mobile"],
+    "rtl": true,
+    "steps": [
+      { "click": { "role": "button", "name": "Language" } },
+      { "click": { "text": "العربية" } }
+    ],
+    "expect": [
+      { "text": "مرحبا" }
+    ]
+  },
+  {
+    "name": "Open the mobile menu",
+    "page": "/",
+    "viewports": ["desktop", "mobile"],
+    "rtl": false,
+    "steps": [
+      { "click": { "role": "button", "name": "Menu" } }
+    ],
+    "expect": [
+      { "visible": { "role": "link", "name": "Pricing" } }
+    ]
+  }
+]
