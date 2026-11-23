@@ -4,11 +4,14 @@
 // it counts as done (verify). State lives in cook/GATES.json.
 //
 // Commands (run from the project root):
-//   init --project <name>                 create cook/GATES.json (needs a passing cook/PREFLIGHT.json)
+//   init --project <name> [--type landing|site|app|component] [--languages en,ar]
+//                                         create cook/GATES.json (needs a passing cook/PREFLIGHT.json)
 //   init --project <name> --mode redesign --src <dir> [--src ...] --url <base url>
 //                                         [--exclude <glob> ...] [--pages /,/pricing]
 //                                         an existing site: steps include 0b (baseline)
 //   set-pages /,/pricing                  pages that matter (each gets stills, inventory, audit)
+//   set-type <landing|site|app|component> the project type: reference count, industry refs, motion and time (PROFILES)
+//   set-languages en,ar                   languages the site ships in; a right-to-left one needs a passing rtl journey
 //   set-checks --cmd "npm test" [--cmd ...]   commands that must keep passing (replaces the list)
 //   set-strategy --in-place | --rebuild --quote "<user words>"
 //   motion-allow <file> <hash> --reason "..." --quote "<user words>"
@@ -25,7 +28,8 @@
 //   reopen <step>                         set this step and every later one back to pending
 //   set-bar --judge 9.2 --floor 8.5 --similarity 99 [--mockup 8] [--quote "..."]
 //                                         --quote: any bar below 9.0 / 8.5 / 8, or any lowering
-//   set-time (--floor 3h | --cap 1.5h) [--quote "..."]
+//   set-time [--floor 3h | --cap 1.5h] [--quote "..."]
+//                                         no flag: the type's default time (landing 3h floor, component 1h cap)
 //                                         --quote: a cap, a floor under 2h, or a lower floor
 //   set-build --src <dir> --url <url or file>
 //   set-motion (--none --quote "..." | --refs)
@@ -66,6 +70,25 @@ export const STEP_NAMES = {
 };
 export const DIMS = ['layout', 'typography', 'color', 'components', 'imagery', 'responsive'];
 export const MOTION_DIM = 'motion';
+// Project types: the reference count, the industry references, the MOTION.md effects and the time default of each.
+// component has a cap (1h) instead of a floor; a cap of 1h or less needs no words from the user.
+export const PROFILES = {
+  landing: { refs: [9, 12], industry: 2, motion: 5, time: { floor: 3 } },
+  site: { refs: [9, 12], industry: 2, motion: 5, time: { floor: 6 } },
+  app: { refs: [5, 8], industry: 1, motion: 2, time: { floor: 2 } },
+  component: { refs: [3, 6], industry: 0, motion: 0, time: { cap: 1 } },
+};
+const RTL_LANGS = ['ar', 'he', 'fa', 'ur'];
+// Logged by the guard hook (since 1.5.0) but never an edit: they must not make a session a builder.
+const READ_TOOLS = ['Read', 'Glob', 'Grep'];
+const MEDIA_EXT = ['.woff', '.woff2', '.ttf', '.otf', '.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif'];
+const typeOf = (g) => (PROFILES[g?.type] ? g.type : 'landing');
+const profileOf = (g) => PROFILES[typeOf(g)];
+// The cap that needs no user words: the component default. Any other cap needs the user's words.
+const freeCapOf = (g) => (typeOf(g) === 'component' ? PROFILES.component.time.cap : 0);
+const langsOf = (g) => (Array.isArray(g?.languages) && g.languages.length ? g.languages : ['en']);
+const isRtl = (lang) => RTL_LANGS.includes(String(lang).split('-')[0].toLowerCase());
+const JOURNEY_VIEWPORTS = ['desktop', 'mobile'];
 const IMG = ['.png', '.jpg', '.jpeg', '.webp'];
 const SRC_EXT = ['.html', '.htm', '.css', '.scss', '.js', '.mjs', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.astro', '.json', '.svg', '.md', '.mdx'];
 
@@ -96,6 +119,14 @@ function parsePages(v) {
   if (!list.length) fail('pages: list them comma-separated, e.g. /,/pricing');
   const bad = list.filter((p) => !(p.startsWith('/') || /^https?:\/\//i.test(p)));
   if (bad.length) fail(`pages must start with / or be full URLs: ${bad.join(', ')}`);
+  return list;
+}
+// Language codes, comma-separated (en,ar): lower-cased, no duplicates.
+function parseLangs(v) {
+  const list = [...new Set(String(v ?? '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean))];
+  if (!list.length) fail('languages: list them comma-separated, e.g. en,ar');
+  const bad = list.filter((x) => !/^[a-z]{2,3}(-[a-z0-9]{2,8})*$/.test(x));
+  if (bad.length) fail(`languages must be codes like en or ar-EG: ${bad.join(', ')}`);
   return list;
 }
 function readText(p) { try { return readFileSync(p, 'utf8'); } catch { return ''; } }
@@ -266,10 +297,11 @@ function summaryFor(round) { return readJson(S('judge', round, 'summary.json'));
 function judgeFilesIn(round) {
   try { return readdirSync(S('judge', round)).filter((f) => f.endsWith('.json') && f !== 'summary.json' && !f.startsWith('.')); } catch { return []; }
 }
-// The ledger entry that wrote a judge file (the first one: a judge file is written once).
+// The ledger entry that wrote a judge file: the LAST one. After archive-judges a name is reused, and the newest writer owns it.
 function judgeWriter(ledger, round, file) {
   const rel = `cook/judge/${round}/${file}`;
-  return ledger.find((e) => e.file === rel) || null;
+  for (let i = ledger.length - 1; i >= 0; i--) if (ledger[i].file === rel) return ledger[i];
+  return null;
 }
 
 // Sessions that edited the build, the mockup or the project: the builders. A judge session
@@ -277,7 +309,7 @@ function judgeWriter(ledger, round, file) {
 function builderSessions(ledger) {
   const ids = new Set();
   for (const e of ledger) {
-    if (!e.session_id || e.tool === 'UserPrompt') continue;
+    if (!e.session_id || e.tool === 'UserPrompt' || READ_TOOLS.includes(e.tool)) continue;
     if (e.tool === 'Bash') {
       if (/(gate|shoot|audit|slop_scan|side-by-side)\.mjs/.test(e.cmd || '')) ids.add(e.session_id);
       continue;
@@ -287,8 +319,54 @@ function builderSessions(ledger) {
   return ids;
 }
 
-// Every judge file must come through the guard hook, and the builder never judges itself.
-function judgeProvenance(round) {
+// Judge reads. When the ledger has Read entries at all, a judge file counts only if its session read the round's
+// side-by-side and a still of the round, and read nothing that shows it the build: no build source, no mockup source,
+// no cook/BRIEF.md, cook/ROUNDS.md or cook/SECTIONS.md, and nothing in the round's judge folder but its own file
+// (the summary, another judge, the hidden A/B key).
+const readsLogged = (ledger) => ledger.some((e) => e.tool === 'Read');
+// A judge session's reads. When the ledger tags reads with an agent and the judge is a subagent, only that agent's reads.
+function readsOfJudge(ledger, w) {
+  const mine = ledger.filter((e) => e.tool === 'Read' && e.session_id === w.session_id);
+  if (w.agent != null && mine.some((e) => e.agent != null)) return mine.filter((e) => e.agent === w.agent);
+  return mine;
+}
+// The build folders, project-relative: the build, and every scope folder in redesign mode.
+function srcDirsRel(g) {
+  const dirs = [g.build?.src, ...(g.scope?.src || [])].filter(Boolean).map((d) => String(d).trim().replace(/^\.\//, '').replace(/\/+$/, ''));
+  return [...new Set(dirs)];
+}
+function underDir(file, dir) {
+  if (dir === '.' || dir === '') return !file.startsWith('cook/');
+  return file === dir || file.startsWith(`${dir}/`);
+}
+function forbiddenForJudge(file, round, own, g) {
+  if (srcDirsRel(g).some((d) => underDir(file, d))) return true;
+  if (['cook/BRIEF.md', 'cook/ROUNDS.md', 'cook/SECTIONS.md'].includes(file)) return true;
+  if (underDir(file, 'cook/mockup')) return true;
+  if (file.startsWith(`cook/judge/${round}/`)) return file !== `cook/judge/${round}/${own}`;
+  return false;
+}
+// What is wrong with one judge file's reads, as sentences (empty when it may count). A file with no writer is
+// reported by judgeProvenance as unlogged, not here.
+function judgeReadProblems(ledger, round, file, g) {
+  const w = judgeWriter(ledger, round, file);
+  if (!w) return [];
+  const reads = readsOfJudge(ledger, w).map((e) => String(e.file || ''));
+  const compareDir = `cook/compare/${round}/`;
+  const stillsDir = round === 'baseline' ? 'cook/baseline/stills/' : `cook/stills/${round}/`;
+  const img = (f) => IMG.includes(extname(f).toLowerCase());
+  const probs = [];
+  const bad = reads.find((f) => forbiddenForJudge(f, round, file, g));
+  if (bad) probs.push(`its session read ${bad} (not fresh)`);
+  if (!reads.some((f) => f.startsWith(compareDir) && img(f)) || !reads.some((f) => f.startsWith(stillsDir) && img(f))) {
+    probs.push(`its session did not read a side-by-side in ${compareDir} and a still in ${stillsDir}`);
+  }
+  return probs;
+}
+
+// Every judge file must come through the guard hook, the builder never judges itself, and (when reads are logged)
+// the judge read only what a fresh judge may read.
+function judgeProvenance(round, g) {
   const ledger = readLedger(root);
   if (!ledger.length) return [[false, 'no ledger: the guard hook is not installed (run /frontend-cook-setup)']];
   const files = judgeFilesIn(round);
@@ -300,15 +378,26 @@ function judgeProvenance(round) {
     if (!w) { unlogged.push(f); continue; }
     if (hasAgents && w.agent == null && builders.has(w.session_id)) selfWritten.push(f);
   }
-  return [
+  const out = [
     [files.length > 0 && unlogged.length === 0, unlogged.length ? `no ledger Write entry for ${unlogged.join(', ')}: a judge writes its own judge file through the guard hook` : (files.length ? 'every judge file was written through the guard hook' : `no judge files in ${round}`)],
     [selfWritten.length === 0, selfWritten.length ? `${selfWritten.join(', ')} written by the builder itself, not by a judge` : 'no judge file was written by the builder itself'],
   ];
+  if (!readsLogged(ledger)) {
+    out.push([true, 'judge reads not logged: update the hook with preflight --install (not checked here)']);
+  } else {
+    for (const f of files) {
+      if (!judgeWriter(ledger, round, f)) continue;
+      const probs = judgeReadProblems(ledger, round, f, g);
+      out.push(probs.length ? [false, `${f}: ${probs.join('; ')}`]
+        : [true, `${f}: its session read the round's side-by-side and a still, and nothing a fresh judge must not see`]);
+    }
+  }
+  return out;
 }
 
 function judgeChecks(g, round, stage, than) {
   const out = [];
-  out.push(...judgeProvenance(round));
+  out.push(...judgeProvenance(round, g));
   const s = summaryFor(round);
   if (!s) { out.push([false, `no judge summary for ${round}: have 2+ fresh judges write cook/judge/${round}/*.json, then run gate.mjs score ${round}`]); return out; }
   const p = S('judge', round, 'summary.json');
@@ -324,6 +413,12 @@ function judgeChecks(g, round, stage, than) {
     : (s.judges >= 3 ? `the lowest judge (${s.lowest_overall}) is more than 1.0 under the median (${s.raw.overall}): fix what it named`
       : `judges disagree by ${s.spread_overall}: add another fresh judge, then score again`);
   out.push([s.spread_ok, spreadMsg]);
+  // The motion and final stages: every judge file scores motion (unless the project has no motion).
+  if ((stage === 'motion' || stage === 'final') && g.motion !== 'none') {
+    for (const f of jpaths) {
+      if (typeof readJson(f)?.scores?.motion !== 'number') out.push([false, `${basename(f)}: missing score for motion`]);
+    }
+  }
   if (stage === 'mockup') {
     out.push([s.calibrated.overall >= g.target.mockup, `mockup feel ${s.calibrated.overall}/10 calibrated (needs ${g.target.mockup})`]);
     return out;
@@ -498,11 +593,12 @@ function doneChecks(g, step) {
         out.push([kept, kept ? 'cook/compare/baseline has the old site beside a reference' : 'cook/compare/baseline is empty: put the old site beside a reference there (reference left, old site right)']);
         const bs = summaryFor('baseline');
         out.push([(bs?.judges ?? 0) >= 2, bs ? `baseline scored by ${bs.judges} judge(s) (need 2+)` : 'no judge summary for the baseline: have 2+ fresh judges write cook/judge/baseline/*.json, then gate.mjs score baseline']);
-        out.push(...judgeProvenance('baseline'));
+        out.push(...judgeProvenance('baseline', g));
         out.push([briefLine('Keep') !== null, 'BRIEF.md has a "Keep:" line (what must survive the redesign)']);
       }
       const ids = refIds();
-      out.push([ids.size >= 9 && ids.size <= 12, `${ids.size} reference(s) in cook/refs (need 9 to 12, named R01...)`]);
+      const prof = profileOf(g);
+      out.push([ids.size >= prof.refs[0] && ids.size <= prof.refs[1], `${ids.size} reference(s) in cook/refs (need ${prof.refs[0]} to ${prof.refs[1]}, named R01...)`]);
       for (const [id, files] of ids) {
         const best = files.map(imageSize).filter(Boolean).sort((a, b) => b.width - a.width)[0];
         out.push([Boolean(best && best.width >= 1200 && best.height >= 600), `${id}: ${best ? `${best.width}x${best.height}` : 'unreadable'} (need 1200x600+, real captures, not thumbnails)`]);
@@ -554,7 +650,7 @@ function doneChecks(g, step) {
           : 'the user was not asked for their own references: ask, wait for the answer, then add them as source "user" (or record: gate.mjs no-user-refs --quote "<their words>")']);
       // References from the client's own industry or adjacent service businesses, marked "industry" in SOURCES.md.
       const industry = [...ids.keys()].filter((id) => src.split('\n').some((l) => new RegExp(`\\b${id}\\b`, 'i').test(l) && /\bindustry\b/i.test(l))).length;
-      out.push([industry >= 2, `${industry} reference(s) from the client's industry or an adjacent service business (need 2+; mark them "industry" in SOURCES.md)`]);
+      out.push([industry >= prof.industry, `${industry} reference(s) from the client's industry or an adjacent service business (need ${prof.industry}+; mark them "industry" in SOURCES.md)`]);
       if (g.mode === 'redesign') {
         out.push([briefLine('Open to change') !== null, briefLine('Open to change') !== null
           ? `BRIEF.md Open to change: ${briefLine('Open to change')}`
@@ -608,8 +704,9 @@ function doneChecks(g, step) {
       const t = g.time || {};
       out.push([Boolean(t.started && t.mode), t.mode ? `time: ${t.mode} ${t.hours}h, started ${t.started}` : 'time not set (gate.mjs set-time --floor 3h)']);
       if (t.mode) {
-        const needWords = t.mode === 'cap' || t.hours < 2;
-        out.push([!needWords || quoteOk(t.quote), !needWords ? `time floor ${t.hours}h`
+        // A cap of the component type's default needs no words; any other cap, and a floor under 2h, does.
+        const needWords = !(t.mode === 'cap' && freeCapOf(g) > 0 && t.hours <= freeCapOf(g)) && (t.mode === 'cap' || t.hours < 2);
+        out.push([!needWords || quoteOk(t.quote), !needWords ? `time ${t.mode} ${t.hours}h`
           : (quoteOk(t.quote) ? `${t.mode} ${t.hours}h, the user's words: "${t.quote}"` : `a ${t.mode} of ${t.hours}h needs the user's words (gate.mjs set-time ... --quote "...")`)]);
       }
       out.push([briefLine('Time') !== null, 'BRIEF.md has a "Time:" line']);
@@ -651,7 +748,8 @@ function doneChecks(g, step) {
       if (g.motion === 'none') { out.push([quoteOk(g.motion_quote), `no motion, user said: "${g.motion_quote || ''}"`]); break; }
       const motion = (() => { try { return readFileSync(S('MOTION.md'), 'utf8'); } catch { return ''; } })();
       const rows = motion.split('\n').filter((l) => /^\s*\|/.test(l) && !/^\s*\|[\s:|-]+\|?\s*$/.test(l) && !/^\s*\|\s*(Ref|Effect|Reference)\b/i.test(l) && !/\|\s*\[[^\]|]+\]\s*\|/.test(l));
-      out.push([rows.length >= 5, `MOTION.md lists ${rows.length} effect(s) (need 5+ table rows)`]);
+      const prof = profileOf(g);
+      out.push([rows.length >= prof.motion, `MOTION.md lists ${rows.length} effect(s) (need ${prof.motion}+ table rows)`]);
       const evidence = (() => { try { return readdirSync(S('refs', 'motion')); } catch { return []; } })();
       const refsDir = (() => { try { return readdirSync(S('refs')); } catch { return []; } })();
       const srcs = designSrcFiles(g);
@@ -665,9 +763,9 @@ function doneChecks(g, step) {
         if (!/^(R|V)\d{2,}$/.test(id)) { unsourced.push(id || '(empty)'); continue; }
         cited.add(id);
       }
-      out.push([vague === 0 && rows.length > 0, vague ? `${vague} effect(s) without a measured duration and easing in the "How" column (e.g. "700ms, cubic-bezier(.2,.7,.2,1), 24px up")` : 'every effect has a duration and an easing']);
+      out.push([vague === 0 && (rows.length > 0 || prof.motion === 0), vague ? `${vague} effect(s) without a measured duration and easing in the "How" column (e.g. "700ms, cubic-bezier(.2,.7,.2,1), 24px up")` : 'every effect has a duration and an easing']);
       out.push([unsourced.length === 0, unsourced.length ? `effects not tied to a reference id (R01 / V01): ${[...new Set(unsourced)].join(', ')}` : 'every effect cites a reference']);
-      out.push([cited.size >= 2, `effects taken from ${cited.size} reference(s) (need 2+: take from many, copy none)`]);
+      if (prof.motion > 0) out.push([cited.size >= 2, `effects taken from ${cited.size} reference(s) (need 2+: take from many, copy none)`]);
       const anim = motionCodeIn(srcs, g);
       out.push([anim.length > 0, anim.length ? `animation code in the build: ${anim.slice(0, 3).join(', ')}` : 'the build has no animation code yet']);
       for (const id of cited) {
@@ -728,15 +826,27 @@ function doneChecks(g, step) {
       });
       out.push([ledger.length > 0, ledger.length ? 'guard hook ledger present' : 'no ledger: the guard hook is not installed (run /frontend-cook-setup)']);
       out.push([separate.length > 0, separate.length ? `separate-session judge verified: ${separate.join(', ')}` : `no judge file in ${r} was written from a separate session (one that never edited the build). Open a new Claude Code session here and run /frontend-cook-judge ${r}`]);
-      const sepMed = median(separate.map((f) => readJson(S('judge', r, f))?.overall));
+      // Judge reads: the separate judge read the round's side-by-side and a still, and nothing a fresh judge must not see.
+      const logged = readsLogged(ledger);
+      if (!logged) {
+        out.push([false, 'judge reads not logged: update the hook with preflight --install']);
+      } else {
+        const bad = separate.map((f) => [f, judgeReadProblems(ledger, r, f, g)]).filter(([, p]) => p.length);
+        out.push(!separate.length ? [false, 'no separate judge session to check the reads of']
+          : bad.length ? [false, bad.map(([f, p]) => `${f}: ${p.join('; ')}`).join(' / ')]
+            : [true, `separate judge(s) ${separate.join(', ')}: read the round's side-by-side and a still, and nothing a fresh judge must not see`]);
+      }
+      const sepOk = logged ? separate.filter((f) => judgeReadProblems(ledger, r, f, g).length === 0) : [];
+      const sepMed = median(sepOk.map((f) => readJson(S('judge', r, f))?.overall));
       const sepCal = sepMed === null ? null : Math.round((sepMed + g.calibration.offset) * 100) / 100;
       out.push([sepCal !== null && sepCal >= g.target.judge, sepCal === null ? 'no separate judge score to check' : `the separate judge scored ${sepCal} calibrated: it must meet the bar on its own (bar ${g.target.judge})`]);
       if (g.time?.mode === 'floor') {
-        const act = activeHours(ledger.filter((e) => e.tool !== 'UserPrompt' && (builders.has(e.session_id) || (e.file || '').startsWith('cook/'))));
+        const act = activeHours(ledger.filter((e) => e.tool !== 'UserPrompt' && !READ_TOOLS.includes(e.tool) && (builders.has(e.session_id) || (e.file || '').startsWith('cook/'))));
         out.push([act >= g.time.hours, `${act.toFixed(1)}h of active work logged (floor ${g.time.hours}h; idle gaps over 15 min do not count). Done before the floor means the bar was read too low`]);
         const n = rounds().filter((x) => (summaryFor(x)?.judges ?? 0) >= 2).length;
         out.push([n >= 3, `${n} judged round(s) with 2+ judges (need 3+ before shipping)`]);
       }
+      out.push(...releaseChecks(g));
       out.push(C.approval(g, 'final'));
       break;
     }
@@ -860,13 +970,128 @@ function roundEvidence(g, r, newest, needVideo) {
     out.push(reg && 'probes_sha1' in reg && reg.probes_sha1 === probesNow
       ? [true, `${r} regress ran on the current probes.json`]
       : [false, `${r} regress was not run on the current probes.json (probes_sha1 ${reg && 'probes_sha1' in reg ? reg.probes_sha1 : 'missing'}, probes.json ${probesNow ?? 'missing'}): run regress again`]);
-    const base = buildUrl(g);
-    for (const page of pages) {
-      out.push(C.reportOk(`audit-${r}-${pageSlug(page)}.json`, newest, `${r} ${page} audit`, { url: base ? pageUrl(base, page) : null }));
-    }
-  } else {
-    out.push(C.reportOk(`audit-${r}.json`, newest, `${r} audit`, { url: buildUrl(g) }));
   }
+  // One audit per page, in both modes. The legacy audit-rNN.json counts only when the pages are exactly ['/'].
+  const base = buildUrl(g);
+  const onlyHome = pages.length === 1 && pages[0] === '/';
+  for (const page of pages) {
+    const file = `audit-${r}-${pageSlug(page)}.json`;
+    const legacy = onlyHome && !existsSync(S('reports', file)) && existsSync(S('reports', `audit-${r}.json`));
+    out.push(auditCheck(legacy ? `audit-${r}.json` : file, newest, `${r} ${page} audit`, base ? pageUrl(base, page) : null));
+  }
+  out.push(...journeysCheck(g, r, newest));
+  return out;
+}
+
+// One audit report of a round: it must come from audit.mjs with checks_version 2 (keyboard, labels, reduced motion,
+// SEO, performance) and must have run on the page's URL.
+function auditCheck(name, newest, label, url) {
+  const rep = report(name);
+  if (rep && !(rep.checks_version >= 2)) return [false, `${label}: audit report from an old audit.mjs: rerun it (checks_version ${rep.checks_version ?? 'missing'}, needs 2)`];
+  return C.reportOk(name, newest, label, { url });
+}
+
+// The HTML file a page is served from in the build folders: index.html for '/', else <path>.html or <path>/index.html.
+function pageHtmlFile(g, page) {
+  try {
+    let path = String(page);
+    if (/^https?:/i.test(path)) path = new URL(path).pathname;
+    const rel = path.replace(/[?#].*$/, '').replace(/^\/+|\/+$/g, '');
+    const names = rel ? [`${rel}.html`, `${rel}/index.html`] : ['index.html'];
+    for (const d of srcDirsRel(g)) {
+      for (const n of names) {
+        const f = join(resolve(root, d), n);
+        if (existsSync(f) && statSync(f).isFile()) return f;
+      }
+    }
+  } catch { /* unreadable page path: no file */ }
+  return null;
+}
+// A page needs a journey when it has a form or more than two links: the baseline inventory when there is one, else its HTML.
+// A page whose HTML cannot be found needs one too.
+function pageNeedsJourney(g, page) {
+  const inv = readJson(S('baseline', 'inventory.json'));
+  if (inv?.pages?.[page]) { const p = inv.pages[page]; return (p.forms || []).length > 0 || (p.links || []).length > 2; }
+  const file = pageHtmlFile(g, page);
+  if (!file) return true;
+  const html = readText(file);
+  return /<form\b/i.test(html) || (html.match(/<a\b[^>]*\bhref\s*=/gi) || []).length > 2;
+}
+// Journeys (roundEvidence, both modes): cook/JOURNEYS.json lists the main tasks; every page with a form or more than two
+// links has one; the round's journeys report ran on this file, is no older than the latest source, and passed on desktop
+// and mobile. A right-to-left language needs a journey with rtl: true that passed on both viewports.
+function journeysCheck(g, r, newest) {
+  const jPath = S('JOURNEYS.json');
+  const js = readJson(jPath);
+  if (!Array.isArray(js)) return [[false, 'cook/JOURNEYS.json missing or not a JSON array: write the main user tasks (sign up, choose a plan, contact, switch language)']];
+  if (!js.length) return [[false, 'cook/JOURNEYS.json has no journeys: write at least one per page with a form or more than two links']];
+  const out = [];
+  const needs = pagesOf(g).filter((p) => pageNeedsJourney(g, p));
+  const uncovered = needs.filter((p) => !js.some((j) => j?.page === p));
+  out.push(uncovered.length ? [false, `no journey on ${uncovered.join(', ')} (a page with a form or more than two links needs one in cook/JOURNEYS.json)`]
+    : [true, `cook/JOURNEYS.json covers every page with a form or more than two links (${needs.join(', ') || 'none'})`]);
+  const repPath = S('reports', `journeys-${r}.json`);
+  const rep = report(`journeys-${r}.json`);
+  const fresh = Boolean(rep) && mtime(repPath) >= newest && rep.journeys_sha1 === sha1File(jPath);
+  const entries = Array.isArray(rep?.journeys) ? rep.journeys : [];
+  const passes = (name) => JOURNEY_VIEWPORTS.every((vp) => entries.some((e) => e?.name === name && e?.viewport === vp && e?.ok === true));
+  if (!rep) out.push([false, `journeys report missing (cook/reports/journeys-${r}.json): run node journeys.mjs --round ${r}`]);
+  else if (mtime(repPath) < newest) out.push([false, `journeys report is older than the latest source change: run node journeys.mjs --round ${r} again`]);
+  else if (rep.journeys_sha1 !== sha1File(jPath)) out.push([false, `journeys report was made from other journeys than cook/JOURNEYS.json: run node journeys.mjs --round ${r} again`]);
+  else {
+    const missing = [], failing = [];
+    for (const j of js) for (const vp of JOURNEY_VIEWPORTS) {
+      const e = entries.find((x) => x?.name === j?.name && x?.viewport === vp);
+      if (!e) missing.push(`${j?.name} (${vp})`);
+      else if (e.ok !== true) failing.push(`${j?.name} (${vp})`);
+    }
+    if (missing.length) out.push([false, `journeys report has no result for ${missing.join(', ')}: run node journeys.mjs --round ${r} again`]);
+    else if (failing.length) out.push([false, `journeys failing in ${r}: ${failing.join(', ')}. Fix them, then run node journeys.mjs --round ${r} again`]);
+    else if (rep.ok !== true) out.push([false, `journeys report is not ok: run node journeys.mjs --round ${r} again`]);
+    else out.push([true, `journeys report: all ${js.length} journey(s) pass on desktop and mobile in ${r}`]);
+  }
+  const rtl = langsOf(g).filter(isRtl);
+  if (rtl.length) {
+    const rtlNames = js.filter((j) => j?.rtl === true).map((j) => j.name);
+    const ok = fresh && rtlNames.some(passes);
+    out.push([ok, ok ? `languages ${langsOf(g).join(',')}: a journey with rtl: true passes on desktop and mobile in ${r} (${rtlNames.join(', ')})`
+      : `languages ${langsOf(g).join(',')}: needs a journey with rtl: true that passes on desktop and mobile in ${r} (${rtlNames.length ? `${rtlNames.join(', ')} is failing, stale or missing a viewport` : 'none in cook/JOURNEYS.json'})`]);
+  }
+  return out;
+}
+// Step 8 release checklist: cook/RELEASE.md has the four headings and every "- [" item is checked (an n/a item gives its reason);
+// cook/CREDITS.md exists when a reference, photo or font came from outside the user.
+function releaseChecks(g) {
+  const out = [];
+  const p = S('RELEASE.md');
+  if (!existsSync(p)) {
+    out.push([false, 'cook/RELEASE.md missing: write the release checklist with ## Content, ## Credits, ## Performance and ## SEO']);
+  } else {
+    const md = readText(p);
+    const heads = h2Set(md);
+    const noHead = ['Content', 'Credits', 'Performance', 'SEO'].filter((h) => !heads.has(h.toLowerCase()));
+    out.push(noHead.length ? [false, `RELEASE.md is missing ${noHead.map((h) => `## ${h}`).join(', ')}`]
+      : [true, 'RELEASE.md has the four headings: Content, Credits, Performance, SEO']);
+    const items = md.split('\n').filter((l) => l.startsWith('- ['));
+    const open = items.filter((l) => !/^- \[[xX]\]/.test(l));
+    if (open.length) out.push([false, `${open.length} unchecked release item(s): ${open.slice(0, 3).map((l) => l.trim().slice(0, 70)).join(' / ')}`]);
+    else if (!items.length) out.push([false, 'RELEASE.md has no checklist items (lines starting with "- [")']);
+    else out.push([true, `all ${items.length} release item(s) are checked`]);
+    const noReason = items.filter((l) => /^- \[[xX]\]\s*n\/a\b/i.test(l) && !/^- \[[xX]\]\s*n\/a:\s*\S/i.test(l));
+    if (noReason.length) out.push([false, `${noReason.length} n/a item(s) without a reason (write - [x] n/a: <reason>): ${noReason[0].trim().slice(0, 70)}`]);
+  }
+  // Credits: every reference whose source is not the user, and every font or photo in the build folders.
+  const src = readText(S('refs', 'SOURCES.md'));
+  const outside = [...refIds().keys()].filter((id) => {
+    const line = src.split('\n').find((l) => new RegExp(`\\b${id}\\b`, 'i').test(l)) || '';
+    return (line.match(/\b(user|inspo|awwwards|web)\b/i) || [])[1]?.toLowerCase() !== 'user';
+  });
+  const media = srcDirsRel(g).flatMap((d) => walk(resolve(root, d), MEDIA_EXT)).map((f) => relative(root, f).split(sep).join('/'));
+  const from = [...outside, ...media];
+  const credits = S('CREDITS.md');
+  if (from.length) out.push([existsSync(credits), existsSync(credits) ? 'CREDITS.md lists the outside sources'
+    : `CREDITS.md missing: ${from.slice(0, 6).join(', ')} came from outside the user`]);
+  else out.push([true, 'no reference, photo or font from outside the user (CREDITS.md not needed)']);
   return out;
 }
 
@@ -989,15 +1214,20 @@ function print(title, checks) {
 function nextStep(g) { return stepsFor(g).find((s) => !['passed', 'overridden'].includes(g.steps[s]?.status)) || null; }
 
 // ---------------- score ----------------
-export function scoreRound(dir, offset = 0) {
+// rejected: { file: reason } for judge files the ledger refuses (their session read what a fresh judge must not read).
+export function scoreRound(dir, offset = 0, rejected = {}) {
   const files = readdirSync(dir).filter((f) => f.endsWith('.json') && f !== 'summary.json' && !f.startsWith('.'));
   const judges = [];
   const problems = [];
   for (const f of files) {
+    if (rejected[f]) { problems.push(`${f}: ${rejected[f]}`); continue; }
     const j = readJson(join(dir, f));
     if (!j) { problems.push(`${f}: not valid JSON`); continue; }
     if (j.fresh !== true) { problems.push(`${f}: not marked fresh:true (a judge must have no build context)`); continue; }
     if (typeof j.overall !== 'number' || j.overall < 0 || j.overall > 10) { problems.push(`${f}: overall must be 0-10`); continue; }
+    // Every judge scores every dimension: a judge missing one is rejected, not averaged over the rest.
+    const missingDims = DIMS.filter((d) => typeof j.scores?.[d] !== 'number');
+    if (missingDims.length) { for (const d of missingDims) problems.push(`${f}: missing score for ${d}`); continue; }
     const badDim = Object.entries(j.scores || {}).find(([, v]) => typeof v !== 'number' || v < 0 || v > 10);
     if (badDim) { problems.push(`${f}: score ${badDim[0]} must be 0-10`); continue; }
     if (!Array.isArray(j.gaps) || j.gaps.length < 3) { problems.push(`${f}: a judge must name at least 3 specific gaps (where, what, fix)`); continue; }
@@ -1092,6 +1322,9 @@ if (isMainRun) {
       if (!project) fail('init needs --project <name>');
       const mode = opt('--mode', 'new');
       if (!['new', 'redesign'].includes(mode)) fail('init --mode new|redesign');
+      const type = opt('--type', 'landing');
+      if (!PROFILES[type]) fail(`init --type ${Object.keys(PROFILES).join('|')}`);
+      const languages = opt('--languages') === null ? ['en'] : parseLangs(opt('--languages'));
       const srcs = optAll('--src');
       // Stored as the gate compares them: no leading ./ and no trailing /, so ./src/legacy/ is src/legacy.
       const excludes = optAll('--exclude').map((x) => String(x).trim().replace(/^\.\//, '').replace(/\/+$/, ''));
@@ -1107,7 +1340,7 @@ if (isMainRun) {
       }
       mkdirSync(S(), { recursive: true });
       const g = {
-        version: 1, project, created: new Date().toISOString(), mode,
+        version: 1, project, created: new Date().toISOString(), mode, type, languages,
         target: { judge: 9.2, floor: 8.5, similarity: 99, mockup: 8.0 },
         time: null, build: null, motion: null, pages,
         calibration: { offset: 0, history: [] },
@@ -1124,6 +1357,7 @@ if (isMainRun) {
     case 'status': {
       const g = load();
       console.log(`Project: ${g.project}   Bar: ${g.target.judge}/10 (floor ${g.target.floor})   Calibration offset: ${g.calibration.offset}`);
+      console.log(`Type: ${typeOf(g)}   Languages: ${langsOf(g).join(', ')}`);
       if (g.mode === 'redesign') console.log(`Mode: redesign of an existing site (baseline first). Pages: ${(g.pages || ['/']).join(', ')}`);
       if (g.time) console.log(`Time: ${g.time.mode} ${g.time.hours}h, ${hoursElapsed(g).toFixed(1)}h elapsed`);
       for (const s of stepsFor(g)) {
@@ -1227,12 +1461,20 @@ if (isMainRun) {
     case 'set-time': {
       const g = load();
       const parseH = (v) => { const m = /^(\d+(?:\.\d+)?)\s*(h|m)?$/i.exec(v || ''); return m ? (m[2]?.toLowerCase() === 'm' ? +m[1] / 60 : +m[1]) : null; };
-      const floor = parseH(opt('--floor')), cap = parseH(opt('--cap'));
+      // No flag: the type's default time (landing 3h floor, component 1h cap).
+      let floor = null, cap = null;
+      if (!argv.includes('--floor') && !argv.includes('--cap')) {
+        if (profileOf(g).time.cap) cap = profileOf(g).time.cap; else floor = profileOf(g).time.floor;
+      } else {
+        floor = argv.includes('--floor') ? parseH(opt('--floor')) : null;
+        cap = argv.includes('--cap') ? parseH(opt('--cap')) : null;
+      }
       if ((floor === null) === (cap === null)) fail('set-time needs exactly one of --floor <hours> or --cap <hours>');
       const hours = floor ?? cap;
       if (!(hours > 0)) fail('set-time hours must be more than 0');
       const lowersFloor = floor !== null && g.time?.mode === 'floor' && floor < g.time.hours;
-      const needQuote = cap !== null || (floor !== null && floor < 2) || lowersFloor;
+      // A cap of the component type's default needs no words; any other cap, and a floor under 2h, does.
+      const needQuote = (cap !== null && !(freeCapOf(g) > 0 && cap <= freeCapOf(g))) || (floor !== null && floor < 2) || lowersFloor;
       const q = opt('--quote');
       if (needQuote) {
         if (!quoteOk(q)) fail('a cap, a floor under 2 hours, or a lower floor needs the user\'s words: --quote "..."');
@@ -1257,6 +1499,21 @@ if (isMainRun) {
       g.pages = parsePages(a1);
       save(g);
       console.log(`pages: ${g.pages.join(', ')}`);
+      break;
+    }
+    case 'set-type': {
+      const g = load();
+      if (!PROFILES[a1]) fail(`set-type <${Object.keys(PROFILES).join('|')}>`);
+      g.type = a1; save(g);
+      const p = PROFILES[a1];
+      console.log(`type: ${a1} (references ${p.refs.join(' to ')}, ${p.industry}+ industry, ${p.motion}+ motion effects, time ${p.time.cap ? `cap ${p.time.cap}h` : `floor ${p.time.floor}h`})`);
+      break;
+    }
+    case 'set-languages': {
+      const g = load();
+      g.languages = parseLangs(a1 ?? opt('--languages'));
+      save(g);
+      console.log(`languages: ${g.languages.join(', ')}${g.languages.some(isRtl) ? ' (right-to-left: needs a passing rtl journey in every round)' : ''}`);
       break;
     }
     case 'set-checks': {
@@ -1369,7 +1626,16 @@ if (isMainRun) {
       if (!a1) fail('score <round> (mockup, r01, r02, ...)');
       const dir = S('judge', a1);
       if (!existsSync(dir)) fail(`no folder cook/judge/${a1}`);
-      const s = scoreRound(dir, g.calibration.offset);
+      // Judge reads (when logged): a judge whose session read what a fresh judge must not read is rejected here too.
+      const ledger = readLedger(root);
+      const rejected = {};
+      if (readsLogged(ledger)) {
+        for (const f of judgeFilesIn(a1)) {
+          const probs = judgeWriter(ledger, a1, f) ? judgeReadProblems(ledger, a1, f, g) : [];
+          if (probs.length) rejected[f] = probs.join('; ');
+        }
+      }
+      const s = scoreRound(dir, g.calibration.offset, rejected);
       s.round = a1;
       writeFileSync(join(dir, 'summary.json'), JSON.stringify(s, null, 2) + '\n');
       for (const p of s.problems) console.log(`REJECTED ${p}`);
@@ -1427,7 +1693,7 @@ if (isMainRun) {
       break;
     }
     default:
-      console.log('usage: gate.mjs init|status|check|verify|approve|override|reopen|set-bar|set-time|set-build|set-motion|set-pages|set-checks|set-strategy|motion-allow|allow-dirty|score|calibrate|elapsed|report (see the header of this file)');
+      console.log('usage: gate.mjs init|status|check|verify|approve|override|reopen|set-bar|set-time|set-build|set-motion|set-pages|set-type|set-languages|set-checks|set-strategy|motion-allow|allow-dirty|score|calibrate|elapsed|report (see the header of this file)');
       process.exit(cmd ? 2 : 0);
   }
 }

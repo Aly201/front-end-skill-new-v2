@@ -54,6 +54,33 @@ function built(file, dir = proj) {
 function mcpCall(dir, tool) {
   logLine(dir, { at: new Date().toISOString(), session_id: 'builder', tool, file: null, agent: null });
 }
+// A Read the guard hook logs for a session (judges read the round's side-by-side and its stills).
+function logRead(dir, session, file) {
+  logLine(dir, { at: new Date().toISOString(), session_id: session, tool: 'Read', file });
+}
+// Both judge sessions of a round (the builder's subagent and the separate session) read its side-by-side and one still.
+function judgeReads(round, still, dir = proj) {
+  for (const s of ['builder', 'judge-session']) {
+    logRead(dir, s, `cook/compare/${round}/all.jpg`);
+    logRead(dir, s, `cook/stills/${round}/${still}`);
+  }
+}
+// cook/JOURNEYS.json and the round's journeys report, as journeys.mjs writes them. fail and omit are [name, viewport]
+// pairs: a failing entry, or one with no result. sha: a wrong sha1 of the journeys file. The report is stamped after
+// the call, so it is newer than the sources written before it.
+const JOURNEY = { name: 'read the rope page', page: '/', viewports: ['desktop', 'mobile'], rtl: false, steps: [], expect: [{ text: 'Rope' }], mock: [] };
+function journeysReport(d, r, { journeys = [JOURNEY], fail = [], omit = [], sha } = {}) {
+  write(join(d, 'cook', 'JOURNEYS.json'), JSON.stringify(journeys));
+  const entries = [];
+  for (const j of journeys) for (const vp of ['desktop', 'mobile']) {
+    if (omit.some(([n, v]) => n === j.name && v === vp)) continue;
+    const ok = !fail.some(([n, v]) => n === j.name && v === vp);
+    entries.push({ name: j.name, viewport: vp, ok, fails: ok ? [] : ['expect: text "Rope"'], states: [], still: `cook/stills/${r}/journey-${j.name.replace(/\W+/g, '-')}-${vp}.png` });
+  }
+  const p = join(d, 'cook', 'reports', `journeys-${r}.json`);
+  write(p, JSON.stringify({ ok: entries.every((e) => e.ok), round: r, journeys: entries, journeys_sha1: sha ?? sha1Of(d, 'cook/JOURNEYS.json'), at: new Date().toISOString() }));
+  later(p);
+}
 const DIMS = ['layout', 'typography', 'color', 'components', 'imagery', 'responsive', 'motion'];
 function judgeDoc(name, overall, model) {
   const scores = Object.fromEntries(DIMS.map((d) => [d, overall]));
@@ -150,6 +177,7 @@ test('gates refuse until proof exists, then pass in order', () => {
   write(cook('compare', 'mockup', 'all.jpg'), 'x');
   assert.equal(slop(cook('mockup'), cook('reports', 'slop-mockup.json')), 0);
   judges('mockup', 8.4);
+  judgeReads('mockup', 'mockup-desktop.png');
   assert.equal(gate('score', 'mockup').code, 0);
   assert.equal(gate('verify', '2').code, 1, 'no approval yet');
   assert.equal(gate('approve', 'mockup', '--quote', 'ok').code, 2, 'approval without the user words is refused');
@@ -193,17 +221,18 @@ test('gates refuse until proof exists, then pass in order', () => {
   write(cook('compare', 'r01', 'all.jpg'), 'x');
   assert.equal(slop(join(proj, 'site'), cook('reports', 'slop-r01.json')), 0);
   const siteUrl = pathToFileURL(join(proj, 'site', 'index.html')).href;
-  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: siteUrl, errors: 0, warnings: 0 }));
+  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: siteUrl, errors: 0, warnings: 0, checks_version: 2 }));
   judges('r01', 8.9);
+  judgeReads('r01', 'S01-desktop.png');
   gate('score', 'r01');
   // Animation code in the static build is refused.
   write(join(proj, 'site', 'anim.css'), 'h1 { animation: rise 1s; }');
   built('site/anim.css');
   assert.match(gate('verify', '6a').out, /animation code in the static build/);
   // An audit of some other URL does not prove this build.
-  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: 'https://other.example/', errors: 0, warnings: 0 }));
+  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: 'https://other.example/', errors: 0, warnings: 0, checks_version: 2 }));
   assert.match(gate('verify', '6a').out, /the audit ran on https:\/\/other\.example\/, not the build/);
-  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: siteUrl, errors: 0, warnings: 0 }));
+  write(cook('reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: siteUrl, errors: 0, warnings: 0, checks_version: 2 }));
   write(join(proj, 'site', 'anim.css'), 'a { transition: color .2s; }');
   // The side-by-side must be at least as new as the newest source: an old one is refused.
   write(cook('compare', 'r01', 'all.jpg'), 'x');
@@ -219,6 +248,7 @@ test('gates refuse until proof exists, then pass in order', () => {
   assert.match(gate('verify', '6a').out, /overall 8\.8\/10 calibrated \(bar 9\.2/, 'below the bar is refused');
   rejudge('r01', 9.6);
   rescore('r01');
+  journeysReport(proj, 'r01');
   // The user approves the static design after the final stills exist, then the gate passes.
   say('static looks good, go on');
   assert.equal(gate('approve', 'static', '--quote', 'static looks good, go on').code, 0);
@@ -233,6 +263,7 @@ test('gates refuse until proof exists, then pass in order', () => {
   write(cook('compare', 'r01', 'all.jpg'), 'x'); later(cook('compare', 'r01', 'all.jpg'));
   rejudge('r01', 9.6);
   rescore('r01');
+  journeysReport(proj, 'r01');
 
   // Step 6b: no motion, by the user's choice
   assert.equal(gate('set-motion', '--none').code, 2, 'no motion needs the user words');
@@ -255,6 +286,9 @@ test('gates refuse until proof exists, then pass in order', () => {
   assert.equal(gate('verify', '7').code, 0, gate('verify', '7').out);
 
   // Step 8: separate judge (judge-session wrote judge-b; the builder never judged itself), calibration, final approval
+  // Step 8 release checklist: every item checked; the references came from Inspo and Awwwards, so CREDITS.md lists them.
+  write(cook('RELEASE.md'), '## Content\n- [x] copy proofread\n\n## Credits\n- [x] n/a: no photos or fonts from outside\n\n## Performance\n- [x] audit clean\n\n## SEO\n- [x] title and description set\n');
+  write(cook('CREDITS.md'), 'R01 to R09: Inspo and Awwwards reference captures, used for layout study only.\n');
   assert.equal(gate('verify', '8').code, 1, 'no final approval yet');
   say('approved, ship it');
   assert.equal(gate('approve', 'final', '--quote', 'approved, ship it').code, 0);
@@ -369,6 +403,7 @@ test('the separate judge must be a session that never built, and must meet the b
   writeJudge(d, 'r01', 'judge-a.json', judgeDoc('A', 9.6, 'm1'), 'builder', 'sub-1');
   writeJudge(d, 'r01', 'judge-b.json', judgeDoc('B', 9.6, 'm2'), 'builder', 'sub-1');
   writeJudge(d, 'r01', 'judge-c.json', judgeDoc('C', 5.0, 'm3'), 'judge-session', null);
+  judgeReads('r01', 'S01-desktop.png', d);
   assert.equal(runGate(d, ['score', 'r01']).code, 0);
   assert.match(runGate(d, ['verify', '8']).out, /the separate judge scored 5 calibrated: it must meet the bar on its own/);
 
@@ -755,7 +790,8 @@ function redesignRound(d, r, { regress = true } = {}) {
     slopRun(d, ['site', '--baseline', 'cook/baseline/slop.json', '--exclude', 'site/legacy/**', '--out', 'cook/reports/slop-step5.json']);
   }
   slopRun(d, ['site', '--baseline', 'cook/reports/slop-step5.json', '--exclude', 'site/legacy/**', '--out', `cook/reports/slop-${r}.json`]);
-  for (const p of DIRS) write(join(d, 'cook', 'reports', `audit-${r}-${slugOf(p)}.json`), JSON.stringify({ ok: true, url: pageUrl('http://localhost:5173', p), errors: 0 }));
+  for (const p of DIRS) write(join(d, 'cook', 'reports', `audit-${r}-${slugOf(p)}.json`), JSON.stringify({ ok: true, url: pageUrl('http://localhost:5173', p), errors: 0, checks_version: 2 }));
+  journeysReport(d, r);
   if (regress) write(join(d, 'cook', 'reports', `regress-${r}.json`), JSON.stringify({ ok: true, errors: 0, warnings: 0, url: 'http://localhost:5173', pages: DIRS, findings: [], probes: [], checks: [], probes_sha1: sha1Of(d, 'cook/baseline/probes.json'), at: new Date().toISOString() }));
 }
 const NEW_SIDE = (k) => k.new;
@@ -949,9 +985,9 @@ test('redesign: every page needs its own stills and audit; a trailing slash in a
   assert.match(v6a(), /FAIL {2}r01 \/pricing desktop still missing \(cook\/stills\/r01\/pricing-desktop\.png\)/);
   png(join(d, 'cook', 'stills', 'r01', 'pricing-desktop.png'), 1440, 900);
   assert.match(v6a(), /PASS {2}r01 \/pricing desktop still is newer/);
-  write(join(d, 'cook', 'reports', 'audit-r01-pricing.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/pricing/', errors: 0 }));
+  write(join(d, 'cook', 'reports', 'audit-r01-pricing.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/pricing/', errors: 0, checks_version: 2 }));
   assert.match(v6a(), /PASS {2}r01 \/pricing audit: clean/, 'the trailing slash is not a different page');
-  write(join(d, 'cook', 'reports', 'audit-r01-pricing.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/', errors: 0 }));
+  write(join(d, 'cook', 'reports', 'audit-r01-pricing.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/', errors: 0, checks_version: 2 }));
   assert.match(v6a(), /FAIL {2}r01 \/pricing audit: the audit ran on http:\/\/localhost:5173\/, not the build/);
   rmSync(join(d, 'cook', 'reports', 'audit-r01-home.json'));
   assert.match(v6a(), /FAIL {2}r01 \/ audit report missing \(cook\/reports\/audit-r01-home\.json\)/);
@@ -1272,4 +1308,254 @@ test('step 1 needs 2+ references from the client industry, and a redesign record
   const g = JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8')); g.mode = 'redesign';
   write(join(d, 'cook', 'GATES.json'), JSON.stringify(g));
   assert.match(runGate(d, ['verify', '1']).out, /no "Open to change:" line/);
+});
+
+// ---- 1.5.0 usability checks: judges, provenance, judge reads, audits per page, journeys, languages, project types,
+// the release checklist. Each numbered item of the spec has its tests below. ----
+
+// A project of one type with n references (inspo and awwwards on distinct hosts; R01 is from the client's industry),
+// the user's words recorded and the set approved. Step 0 passes.
+function typedRefsProject(type, n) {
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-type-')));
+  write(join(d, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  assert.equal(runGate(d, ['init', '--project', 'T', '--type', type]).code, 0);
+  write(join(d, 'cook', 'BRIEF.md'), "# Brief\nTarget: a rope maker.\nUser's words: \"make it feel like a workshop\"\n");
+  const hosts = Array.from({ length: n }, (_, i) => `site${i + 1}.com`);
+  hosts.forEach((h, i) => png(join(d, 'cook', 'refs', `R0${i + 1}.png`), 1440, 900));
+  write(join(d, 'cook', 'refs', 'SOURCES.md'), hosts.map((h, i) => `R0${i + 1} | ${i % 2 === 0 ? 'inspo' : 'awwwards'} | https://${h}/ | take: type${i === 0 ? ' | industry: marine supply' : ''}`).join('\n'));
+  write(join(d, 'cook', 'SHOTS.md'), hosts.map((h, i) => `| S0${i + 1} | R0${i + 1} | hero | desktop | spacing | - |`).join('\n'));
+  mcpCall(d, 'mcp__inspo__recommend');
+  mcpCall(d, 'mcp__awwwards__search_sites');
+  say('I have no references of my own, find them for me.', d);
+  assert.equal(runGate(d, ['no-user-refs', '--quote', 'I have no references of my own']).code, 0);
+  say('These references look right, approved.', d);
+  assert.equal(runGate(d, ['approve', 'references', '--quote', 'These references look right, approved']).code, 0);
+  return d;
+}
+
+test('item 1: a judge missing a dimension is rejected by score, and a judge without a motion score fails the motion stage', () => {
+  const d = newProject();
+  write(join(d, 'site', 'index.html'), page('<h1>x</h1>'));
+  assert.equal(runGate(d, ['set-build', '--src', 'site', '--url', 'http://localhost:5173']).code, 0);
+  assert.equal(runGate(d, ['set-motion', '--refs']).code, 0);
+  writeJudge(d, 'r01', 'judge-a.json', judgeDoc('A', 9.4, 'm1'), 'builder', 'sub-1');
+  writeJudge(d, 'r01', 'judge-b.json', { ...judgeDoc('B', 9.2, 'm2'), session: 'separate' }, 'judge-session', null);
+  const noColor = judgeDoc('C', 9.4, 'm3');
+  delete noColor.scores.color;
+  writeJudge(d, 'r01', 'judge-c.json', noColor, 'judge-third', null);
+  const sc = runGate(d, ['score', 'r01']);
+  assert.match(sc.out, /REJECTED judge-c\.json: missing score for color/);
+  const sum = () => JSON.parse(readFileSync(join(d, 'cook', 'judge', 'r01', 'summary.json'), 'utf8'));
+  assert.equal(sum().judges, 2, 'the judge with a missing dimension does not count');
+  assert.deepEqual(sum().problems, ['judge-c.json: missing score for color']);
+
+  // A judge that scores every static dimension but not motion: the motion stage refuses it (score still counts it).
+  const noMotion = judgeDoc('D', 9.4, 'm4');
+  delete noMotion.scores.motion;
+  writeJudge(d, 'r01', 'judge-d.json', noMotion, 'judge-fourth', null);
+  assert.equal(runGate(d, ['score', 'r01']).code, 0);
+  assert.equal(sum().judges, 3);
+  const motion = runGate(d, ['verify', '6b']).out;
+  assert.match(motion, /FAIL {2}judge-d\.json: missing score for motion/);
+  assert.doesNotMatch(motion, /judge-a\.json: missing score for motion/);
+});
+
+test('item 2: after archive-judges, a reused judge-a.json belongs to the session that wrote it last', () => {
+  const d = newProject();
+  write(join(d, 'cook', 'mockup', 'index.html'), page('<h1>x</h1>'));
+  built('cook/mockup/index.html', d);
+  // A subagent judge tags the ledger with agents, which the builder-written check needs to run.
+  writeJudge(d, 'mockup', 'judge-b.json', judgeDoc('B', 9, 'm2'), 'judge-two', 'sub-2');
+  writeJudge(d, 'mockup', 'judge-a.json', judgeDoc('A', 9, 'm1'), 'builder', null);
+  const selfLine = () => lineWith(runGate(d, ['verify', '2']).out, /written by the builder itself/);
+  assert.match(selfLine(), /FAIL {2}judge-a\.json written by the builder itself/);
+
+  // Retired, then the same name written by a new judge session: the file is that session's.
+  assert.equal(runGate(d, ['archive-judges', 'mockup']).code, 0);
+  writeJudge(d, 'mockup', 'judge-a.json', judgeDoc('A', 9, 'm1'), 'judge-new', null);
+  assert.match(selfLine(), /PASS {2}no judge file was written by the builder itself/);
+});
+
+test('item 3: a judge session that read cook/BRIEF.md is rejected; one that read the round\'s side-by-side and stills passes', () => {
+  const d = newProject();
+  write(join(d, 'site', 'index.html'), page('<h1>x</h1>'));
+  assert.equal(runGate(d, ['set-build', '--src', 'site', '--url', 'http://localhost:5173']).code, 0);
+  const SIDE = 'cook/compare/r01/all.jpg', STILL = 'cook/stills/r01/S01-desktop.png';
+  writeJudge(d, 'r01', 'judge-ok.json', judgeDoc('OK', 9.4, 'm1'), 'judge-ok', null);
+  writeJudge(d, 'r01', 'judge-brief.json', judgeDoc('BRIEF', 9.4, 'm2'), 'judge-brief', null);
+  writeJudge(d, 'r01', 'judge-src.json', judgeDoc('SRC', 9.4, 'm3'), 'judge-src', null);
+  writeJudge(d, 'r01', 'judge-peek.json', judgeDoc('PEEK', 9.4, 'm4'), 'judge-peek', null);
+  writeJudge(d, 'r01', 'judge-none.json', judgeDoc('NONE', 9.4, 'm5'), 'judge-none', null);
+  for (const s of ['judge-ok', 'judge-brief', 'judge-src', 'judge-peek']) { logRead(d, s, SIDE); logRead(d, s, STILL); }
+  logRead(d, 'judge-brief', 'cook/BRIEF.md');
+  logRead(d, 'judge-src', 'site/index.html');
+  logRead(d, 'judge-peek', 'cook/judge/r01/judge-ok.json');
+
+  const sc = runGate(d, ['score', 'r01']);
+  assert.match(sc.out, /REJECTED judge-brief\.json: its session read cook\/BRIEF\.md \(not fresh\)/);
+  assert.match(sc.out, /REJECTED judge-src\.json: its session read site\/index\.html \(not fresh\)/);
+  assert.match(sc.out, /REJECTED judge-peek\.json: its session read cook\/judge\/r01\/judge-ok\.json \(not fresh\)/);
+  assert.match(sc.out, /REJECTED judge-none\.json: its session did not read a side-by-side/);
+  assert.equal(JSON.parse(readFileSync(join(d, 'cook', 'judge', 'r01', 'summary.json'), 'utf8')).judges, 1, 'only judge-ok counts');
+
+  const v8 = runGate(d, ['verify', '8']).out;
+  assert.match(v8, /PASS {2}judge-ok\.json: its session read the round's side-by-side and a still/);
+  assert.match(v8, /FAIL {2}judge-brief\.json: its session read cook\/BRIEF\.md \(not fresh\)/);
+  assert.match(v8, /FAIL {2}judge-none\.json: its session did not read a side-by-side/);
+});
+
+test('item 3: without any Read entry the step 8 check says the reads are not logged, and the earlier steps only note it', () => {
+  const d = newProject();
+  writeJudge(d, 'r01', 'judge-a.json', judgeDoc('A', 9.4, 'm1'), 'judge-a', null);
+  assert.match(runGate(d, ['verify', '8']).out, /FAIL {2}judge reads not logged: update the hook with preflight --install/);
+  assert.match(runGate(d, ['verify', '6a']).out, /PASS {2}judge reads not logged: update the hook with preflight --install \(not checked here\)/);
+});
+
+test('item 4: a new-mode project with two pages needs audit-rNN-<page>.json for each; the legacy audit-rNN.json does not count', () => {
+  const d = newProject();
+  write(join(d, 'site', 'index.html'), page('<h1>Rope</h1>'));
+  mkdirSync(join(d, 'cook', 'judge', 'r01'), { recursive: true });
+  assert.equal(runGate(d, ['set-pages', '/,/pricing']).code, 0);
+  assert.equal(runGate(d, ['set-build', '--src', 'site', '--url', 'http://localhost:5173']).code, 0);
+  for (const f of ['home', 'pricing']) for (const vp of ['desktop', 'mobile']) png(join(d, 'cook', 'stills', 'r01', `${f}-${vp}.png`), vp === 'desktop' ? 1440 : 780, 900);
+  write(join(d, 'cook', 'compare', 'r01', 'all.jpg'), 'x');
+  slopRun(d, [join(d, 'site'), '--out', join(d, 'cook', 'reports', 'slop-r01.json')]);
+  journeysReport(d, 'r01', { journeys: [{ ...JOURNEY, page: '/' }] });
+  const audit = (name, url) => write(join(d, 'cook', 'reports', name), JSON.stringify({ ok: true, url, errors: 0, checks_version: 2 }));
+  audit('audit-r01.json', 'http://localhost:5173/');
+  audit('audit-r01-home.json', 'http://localhost:5173/');
+  const out = () => runGate(d, ['verify', '6a']).out;
+  assert.match(out(), /PASS {2}r01 \/ audit: clean/);
+  assert.match(out(), /FAIL {2}r01 \/pricing audit report missing \(cook\/reports\/audit-r01-pricing\.json\)/, 'a 2-page build fails without audit-r01-pricing.json');
+  audit('audit-r01-pricing.json', 'http://localhost:5173/pricing');
+  assert.match(out(), /PASS {2}r01 \/pricing audit: clean/);
+  rmSync(join(d, 'cook', 'reports', 'audit-r01-home.json'));
+  assert.match(out(), /FAIL {2}r01 \/ audit report missing \(cook\/reports\/audit-r01-home\.json\)/, 'the legacy name is not accepted for two pages');
+});
+
+test('item 4: an audit report without checks_version 2 is refused, in both the one-page and the per-page form', () => {
+  const d = newProject();
+  write(join(d, 'site', 'index.html'), page('<h1>Rope</h1>'));
+  mkdirSync(join(d, 'cook', 'judge', 'r01'), { recursive: true });
+  assert.equal(runGate(d, ['set-build', '--src', 'site', '--url', 'http://localhost:5173']).code, 0);
+  png(join(d, 'cook', 'stills', 'r01', 'S01-desktop.png'), 1440, 900);
+  png(join(d, 'cook', 'stills', 'r01', 'S01-mobile.png'), 780, 900);
+  write(join(d, 'cook', 'compare', 'r01', 'all.jpg'), 'x');
+  slopRun(d, [join(d, 'site'), '--out', join(d, 'cook', 'reports', 'slop-r01.json')]);
+  journeysReport(d, 'r01', { journeys: [{ ...JOURNEY, page: '/' }] });
+  const out = () => runGate(d, ['verify', '6a']).out;
+  write(join(d, 'cook', 'reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/', errors: 0 }));
+  assert.match(out(), /FAIL {2}r01 \/ audit: audit report from an old audit\.mjs: rerun it \(checks_version missing, needs 2\)/);
+  write(join(d, 'cook', 'reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/', errors: 0, checks_version: 1 }));
+  assert.match(out(), /FAIL {2}r01 \/ audit: audit report from an old audit\.mjs: rerun it \(checks_version 1, needs 2\)/);
+  write(join(d, 'cook', 'reports', 'audit-r01.json'), JSON.stringify({ ok: true, url: 'http://localhost:5173/', errors: 0, checks_version: 2 }));
+  assert.match(out(), /PASS {2}r01 \/ audit: clean/);
+});
+
+test('item 5: journeys need the file, a journey on each page with a form, and a fresh report that passed on desktop and mobile', () => {
+  const d = newProject();
+  write(join(d, 'site', 'index.html'), page('<h1>Rope</h1><form><input name="q"><button>Go</button></form>'));
+  assert.equal(runGate(d, ['set-build', '--src', 'site', '--url', 'http://localhost:5173']).code, 0);
+  mkdirSync(join(d, 'cook', 'judge', 'r01'), { recursive: true });
+  const out = () => runGate(d, ['verify', '6a']).out;
+  assert.match(out(), /FAIL {2}cook\/JOURNEYS\.json missing or not a JSON array/);
+  write(join(d, 'cook', 'JOURNEYS.json'), '[]');
+  assert.match(out(), /FAIL {2}cook\/JOURNEYS\.json has no journeys/);
+  journeysReport(d, 'r01', { journeys: [{ ...JOURNEY, page: '/pricing' }] });
+  assert.match(out(), /FAIL {2}no journey on \/ \(a page with a form or more than two links needs one/, 'the form page on / needs a journey');
+  journeysReport(d, 'r01');
+  assert.match(out(), /PASS {2}cook\/JOURNEYS\.json covers every page with a form or more than two links \(\/\)/);
+  assert.match(out(), /PASS {2}journeys report: all 1 journey\(s\) pass on desktop and mobile in r01/);
+
+  journeysReport(d, 'r01', { omit: [['read the rope page', 'mobile']] });
+  assert.match(out(), /FAIL {2}journeys report has no result for read the rope page \(mobile\)/, 'mobile is required too');
+  journeysReport(d, 'r01', { fail: [['read the rope page', 'mobile']] });
+  assert.match(out(), /FAIL {2}journeys failing in r01: read the rope page \(mobile\)/);
+  journeysReport(d, 'r01', { sha: 'f'.repeat(40) });
+  assert.match(out(), /FAIL {2}journeys report was made from other journeys than cook\/JOURNEYS\.json/);
+  rmSync(join(d, 'cook', 'reports', 'journeys-r01.json'));
+  assert.match(out(), /FAIL {2}journeys report missing \(cook\/reports\/journeys-r01\.json\)/);
+
+  // The report is older than a source change made after it (mtimes set apart, so the test does not depend on the clock).
+  journeysReport(d, 'r01');
+  const at = (s) => new Date(Date.now() + s * 1000);
+  utimesSync(join(d, 'site', 'index.html'), at(60), at(60));
+  assert.match(out(), /FAIL {2}journeys report is older than the latest source change/);
+  utimesSync(join(d, 'cook', 'reports', 'journeys-r01.json'), at(120), at(120));
+  assert.match(out(), /PASS {2}journeys report: all 1 journey\(s\) pass on desktop and mobile in r01/);
+});
+
+test('item 6: languages en,ar need a journey with rtl: true that passes on desktop and mobile in every round', () => {
+  const d = newProject();
+  assert.equal(runGate(d, ['set-languages', 'en,ar']).code, 0);
+  assert.deepEqual(JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8')).languages, ['en', 'ar']);
+  mkdirSync(join(d, 'cook', 'judge', 'r01'), { recursive: true });
+  const line = () => lineWith(runGate(d, ['verify', '6a']).out, /languages en,ar/);
+  journeysReport(d, 'r01');
+  assert.match(line(), /FAIL {2}languages en,ar: needs a journey with rtl: true that passes on desktop and mobile in r01 \(none in cook\/JOURNEYS\.json\)/);
+  const rtl = { ...JOURNEY, name: 'switch to arabic', rtl: true };
+  journeysReport(d, 'r01', { journeys: [JOURNEY, rtl], fail: [['switch to arabic', 'mobile']] });
+  assert.match(line(), /FAIL {2}languages en,ar: needs a journey with rtl: true.*switch to arabic is failing, stale or missing a viewport/, 'passing on desktop only is not enough');
+  journeysReport(d, 'r01', { journeys: [JOURNEY, rtl] });
+  assert.match(line(), /PASS {2}languages en,ar: a journey with rtl: true passes on desktop and mobile in r01 \(switch to arabic\)/);
+  assert.equal(runGate(d, ['set-languages', 'en']).code, 0);
+  assert.doesNotMatch(runGate(d, ['verify', '6a']).out, /languages en/, 'an English-only site needs no rtl journey');
+  assert.equal(runGate(d, ['set-languages', 'en,@@']).code, 2, 'a bad language code is refused');
+});
+
+test('item 7: type app needs 5 to 8 references and 2 MOTION.md rows; landing keeps 9 to 12', () => {
+  const app5 = typedRefsProject('app', 5);
+  assert.match(runGate(app5, ['verify', '1']).out, /PASS {2}5 reference\(s\) in cook\/refs \(need 5 to 8/);
+  assert.match(runGate(typedRefsProject('app', 4), ['verify', '1']).out, /FAIL {2}4 reference\(s\) in cook\/refs \(need 5 to 8/);
+  assert.match(runGate(typedRefsProject('app', 9), ['verify', '1']).out, /FAIL {2}9 reference\(s\) in cook\/refs \(need 5 to 8/);
+  assert.match(runGate(typedRefsProject('landing', 5), ['verify', '1']).out, /FAIL {2}5 reference\(s\) in cook\/refs \(need 9 to 12/, 'landing is unchanged');
+
+  assert.equal(runGate(app5, ['set-motion', '--refs']).code, 0);
+  const head = '| Ref | Time | What moves | How | Why | Use in |\n|---|---|---|---|---|---|\n';
+  const row = (ref) => `| ${ref} | 0:02 | hero lines | 700ms, cubic-bezier(.2,.7,.2,1), 24px up | reads in order | S1 |`;
+  write(join(app5, 'cook', 'MOTION.md'), `${head}${row('R01')}\n`);
+  assert.match(runGate(app5, ['verify', '6b']).out, /FAIL {2}MOTION\.md lists 1 effect\(s\) \(need 2\+ table rows\)/);
+  write(join(app5, 'cook', 'MOTION.md'), `${head}${row('R01')}\n${row('R03')}\n`);
+  assert.match(runGate(app5, ['verify', '6b']).out, /PASS {2}MOTION\.md lists 2 effect\(s\) \(need 2\+ table rows\)/);
+});
+
+test('item 7: type component takes a 1h cap without the user\'s words, a 2h cap needs them, and the default time follows the type', () => {
+  const c = typedRefsProject('component', 3);
+  assert.match(runGate(c, ['verify', '1']).out, /PASS {2}3 reference\(s\) in cook\/refs \(need 3 to 6/);
+  const G = (d) => JSON.parse(readFileSync(join(d, 'cook', 'GATES.json'), 'utf8'));
+  assert.equal(runGate(c, ['set-time']).code, 0, 'no flag: the type default');
+  assert.deepEqual([G(c).time.mode, G(c).time.hours], ['cap', 1], 'component defaults to a 1h cap');
+  assert.match(runGate(c, ['verify', '4']).out, /PASS {2}time cap 1h/);
+  assert.equal(runGate(c, ['set-time', '--cap', '2h']).code, 2, 'a 2h cap needs the words');
+  assert.equal(runGate(c, ['set-time', '--cap', '1h']).code, 0, 'a 1h cap needs no words');
+  assert.match(runGate(c, ['verify', '4']).out, /PASS {2}time cap 1h/);
+
+  const l = newProject();
+  assert.equal(runGate(l, ['set-time']).code, 0);
+  assert.deepEqual([G(l).time.mode, G(l).time.hours], ['floor', 3], 'landing defaults to a 3h floor');
+  assert.equal(runGate(l, ['set-time', '--cap', '1h']).code, 2, 'a cap on landing needs the words');
+  assert.equal(runGate(l, ['set-type', 'component']).code, 0);
+  assert.equal(runGate(l, ['set-type', 'bogus']).code, 2, 'an unknown type is refused');
+  const bad = realpathSync(mkdtempSync(join(tmpdir(), 'fecook-badtype-')));
+  write(join(bad, 'cook', 'PREFLIGHT.json'), JSON.stringify({ ok: true, checked_at: new Date().toISOString(), checks: {} }));
+  assert.equal(runGate(bad, ['init', '--project', 'B', '--type', 'bogus']).code, 2);
+  assert.equal(existsSync(join(bad, 'cook', 'GATES.json')), false, 'a refused init writes nothing');
+});
+
+test('item 8: RELEASE.md needs its four headings and every item checked; CREDITS.md lists references from outside the user', () => {
+  const d = refsProject();   // Inspo and Awwwards references: CREDITS.md is needed
+  mkdirSync(join(d, 'cook', 'judge', 'r01'), { recursive: true });   // step 8 checks the latest round
+  const v8 = () => runGate(d, ['verify', '8']).out;
+  assert.match(v8(), /FAIL {2}cook\/RELEASE\.md missing/);
+  write(join(d, 'cook', 'RELEASE.md'), '## Content\n- [x] copy proofread\n\n## Credits\n- [x] n/a: no photos\n\n## Performance\n- [x] audit clean\n');
+  assert.match(v8(), /FAIL {2}RELEASE\.md is missing ## SEO/);
+  write(join(d, 'cook', 'RELEASE.md'), '## Content\n- [x] copy proofread\n\n## Credits\n- [ ] credits listed\n\n## Performance\n- [x] audit clean\n\n## SEO\n- [x] title set\n');
+  assert.match(v8(), /FAIL {2}1 unchecked release item\(s\): - \[ \] credits listed/);
+  write(join(d, 'cook', 'RELEASE.md'), '## Content\n- [x] copy proofread\n\n## Credits\n- [x] n/a:\n\n## Performance\n- [x] audit clean\n\n## SEO\n- [x] title set\n');
+  assert.match(v8(), /FAIL {2}1 n\/a item\(s\) without a reason/);
+  write(join(d, 'cook', 'RELEASE.md'), '## Content\n- [x] copy proofread\n\n## Credits\n- [x] n/a: no photos or fonts from outside\n\n## Performance\n- [x] audit clean\n\n## SEO\n- [x] title set\n');
+  assert.match(v8(), /PASS {2}all 4 release item\(s\) are checked/);
+  assert.match(v8(), /FAIL {2}CREDITS\.md missing: R01, R02/, 'the Inspo and Awwwards references need credits');
+  write(join(d, 'cook', 'CREDITS.md'), 'R01 to R09: Inspo and Awwwards captures, for layout study.\n');
+  assert.match(v8(), /PASS {2}CREDITS\.md lists the outside sources/);
 });
